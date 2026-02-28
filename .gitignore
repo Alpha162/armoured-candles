@@ -1,0 +1,18 @@
+# Arduino IDE
+*.elf
+*.bin
+*.hex
+*.map
+build/
+.build/
+
+# VS Code / PlatformIO
+.vscode/
+.pio/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — don't commit your WiFi creds!
+# Edit cfgSSID/cfgPass in the web UI or NVS, not in source
