@@ -1,4 +1,4 @@
-# Armoured Bird EPD Display
+# armoured-candles
 
 A self-refreshing cryptocurrency candlestick chart on a Waveshare 7.5" e-ink display, driven by a Seeed XIAO ESP32-S3. Pulls live OHLCV data from the Hyperliquid DEX API and renders candles, EMA/RSI indicators, and volume bars to a 800×480 1-bit framebuffer.
 
@@ -125,8 +125,8 @@ Uses Hyperliquid's public REST API (no authentication required):
 ## Project Structure
 
 ```
-epd_candles/
-├── epd_candles.ino      # Main sketch: config, WiFi, API, chart rendering, web UI
+armoured-candles/
+├── armoured-candles.ino      # Main sketch: config, WiFi, API, chart rendering, web UI
 ├── epd7in5_V2.cpp/.h    # Display driver (full + partial refresh)
 ├── epdif.cpp/.h         # SPI interface layer
 └── splash_image.h       # Boot splash (auto-generated 1-bit image header)
