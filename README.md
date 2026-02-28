@@ -25,7 +25,7 @@ Fully configurable via a built-in web UI — no reflashing needed to change pair
 | Display | Waveshare 7.5" V2 (800×480 B/W) — GDEY075T7 |
 | Driver | Waveshare e-Paper Driver HAT Rev 2.3 |
 | Housing | Seeed Studio e-ink frame/case |
-| Power | USB 5V (powerbank recommended) |
+| Power | Stable USB 5V |
 
 ## Wiring
 
