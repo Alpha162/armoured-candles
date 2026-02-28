@@ -25,6 +25,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <Update.h>
 #include "epd7in5_V2.h"
 #include "splash_image.h"
 
@@ -587,6 +588,18 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
 <div class="container">
 
+  <!-- DISPLAY PREVIEW -->
+  <div class="card">
+    <div class="card-head"><span class="icon">&#9635;</span><h2>Display Preview</h2></div>
+    <div class="card-body" style="text-align:center">
+      <img id="displayPreview" src="/api/display" alt="Display preview"
+           style="width:100%;max-width:800px;border:1px solid var(--border);border-radius:6px;image-rendering:pixelated;background:#fff">
+      <div style="margin-top:8px;font-size:0.72em;color:var(--text-dim);font-family:'JetBrains Mono',monospace">
+        Auto-refreshes every 30s &bull; <a href="/api/display" target="_blank" style="color:var(--accent);text-decoration:none">Open full size</a>
+      </div>
+    </div>
+  </div>
+
   <!-- CHART CONFIG -->
   <div class="card">
     <div class="card-head"><span class="icon">&#9670;</span><h2>Chart</h2></div>
@@ -697,6 +710,29 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         <input type="password" id="wifipass" placeholder="Network password">
         <div class="hint">WiFi changes take effect after reboot</div>
       </div>
+    </div>
+  </div>
+
+  <!-- FIRMWARE UPDATE -->
+  <div class="card">
+    <div class="card-head"><span class="icon">&#8679;</span><h2>Firmware Update</h2></div>
+    <div class="card-body">
+      <div class="field">
+        <label>Upload .bin file</label>
+        <input type="file" id="fwFile" accept=".bin"
+               style="width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text-bright);font-family:'JetBrains Mono',monospace;font-size:0.85em">
+        <div class="hint">Arduino IDE: Sketch &rarr; Export Compiled Binary, then upload the .bin file here</div>
+      </div>
+      <div id="fwProgress" style="display:none;margin-top:10px">
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;height:28px;overflow:hidden">
+          <div id="fwBar" style="height:100%;width:0%;background:var(--accent-dim);border-right:2px solid var(--accent);transition:width .2s;display:flex;align-items:center;justify-content:center">
+            <span id="fwPct" style="font-family:'JetBrains Mono',monospace;font-size:0.75em;color:var(--accent)">0%</span>
+          </div>
+        </div>
+      </div>
+      <button class="btn" onclick="uploadFirmware()" style="margin-top:10px;width:100%;justify-content:center">
+        &#8679; Upload &amp; Install
+      </button>
     </div>
   </div>
 
@@ -832,6 +868,54 @@ async function rebootDevice() {
   } catch(e) { toast('Rebooting...'); }
 }
 
+// Display preview auto-refresh
+function refreshPreview() {
+  const img = document.getElementById('displayPreview');
+  img.src = '/api/display?t=' + Date.now();
+}
+setInterval(refreshPreview, 30000);
+
+// Firmware upload
+function uploadFirmware() {
+  const fileInput = document.getElementById('fwFile');
+  if (!fileInput.files.length) { toast('Select a .bin file first', true); return; }
+  if (!confirm('Upload firmware and reboot?')) return;
+
+  const file = fileInput.files[0];
+  const formData = new FormData();
+  formData.append('update', file);
+
+  const xhr = new XMLHttpRequest();
+  const progress = document.getElementById('fwProgress');
+  const bar = document.getElementById('fwBar');
+  const pct = document.getElementById('fwPct');
+  progress.style.display = 'block';
+
+  xhr.upload.onprogress = function(e) {
+    if (e.lengthComputable) {
+      const p = Math.round(e.loaded / e.total * 100);
+      bar.style.width = p + '%';
+      pct.textContent = p + '%';
+    }
+  };
+
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      bar.style.width = '100%';
+      pct.textContent = '100%';
+      toast('Firmware updated — rebooting...');
+      setTimeout(function() { location.reload(); }, 10000);
+    } else {
+      toast('Update failed: ' + xhr.responseText, true);
+    }
+  };
+
+  xhr.onerror = function() { toast('Upload error', true); };
+
+  xhr.open('POST', '/api/update');
+  xhr.send(formData);
+}
+
 loadConfig();
 setInterval(loadConfig, 30000);
 </script>
@@ -935,12 +1019,89 @@ void handleRestart() {
     ESP.restart();
 }
 
+// ── Display preview — serve framebuffer as 1-bit BMP ──
+
+void handleDisplayBMP() {
+    const int W = SCR_W;            // 800
+    const int H = SCR_H;            // 480
+    const int rowBytes = W / 8;     // 100  (already 4-byte aligned)
+    const int imgSize  = rowBytes * H;
+    const int fileSize = 62 + imgSize;
+
+    // BMP file header (14) + DIB header (40) + 2-colour palette (8)
+    uint8_t hdr[62];
+    memset(hdr, 0, sizeof(hdr));
+
+    // -- File header (14 bytes) --
+    hdr[0] = 'B'; hdr[1] = 'M';
+    hdr[2] = fileSize; hdr[3] = fileSize >> 8; hdr[4] = fileSize >> 16; hdr[5] = fileSize >> 24;
+    hdr[10] = 62;  // pixel data offset
+
+    // -- BITMAPINFOHEADER (40 bytes) --
+    hdr[14] = 40;                    // header size
+    hdr[18] = W; hdr[19] = W >> 8;  // width
+    hdr[22] = H; hdr[23] = H >> 8;  // height (positive = bottom-up)
+    hdr[26] = 1;                     // planes
+    hdr[28] = 1;                     // bits per pixel
+    // compression = 0 (BI_RGB), image size can be 0 for BI_RGB
+
+    // -- Colour table: index 0 = black, index 1 = white --
+    // Entry 0: B G R A = 0,0,0,0
+    hdr[54] = 0; hdr[55] = 0; hdr[56] = 0; hdr[57] = 0;
+    // Entry 1: B G R A = 255,255,255,0
+    hdr[58] = 0xFF; hdr[59] = 0xFF; hdr[60] = 0xFF; hdr[61] = 0;
+
+    server.setContentLength(fileSize);
+    server.send(200, "image/bmp", "");
+    server.sendContent((const char*)hdr, sizeof(hdr));
+
+    // Send rows bottom-to-top (BMP convention)
+    for (int y = H - 1; y >= 0; y--) {
+        server.sendContent((const char*)&framebuf[y * rowBytes], rowBytes);
+    }
+}
+
+// ── OTA firmware update via browser upload ──
+
+void handleUpdateResult() {
+    server.sendHeader("Connection", "close");
+    if (Update.hasError()) {
+        server.send(500, "application/json", "{\"error\":\"Update failed\"}");
+    } else {
+        server.send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting...\"}");
+        delay(1000);
+        ESP.restart();
+    }
+}
+
+void handleUpdateUpload() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("OTA update: %s\n", upload.filename.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (!Update.end(true)) {
+            Update.printError(Serial);
+        } else {
+            Serial.println("OTA update complete");
+        }
+    }
+}
+
 void setupWebServer() {
     server.on("/",          HTTP_GET,  handleRoot);
     server.on("/api/status",HTTP_GET,  handleStatus);
     server.on("/api/config",HTTP_POST, handleConfigPost);
     server.on("/api/refresh",HTTP_POST,handleRefresh);
     server.on("/api/restart",HTTP_POST,handleRestart);
+    server.on("/api/display",HTTP_GET, handleDisplayBMP);
+    server.on("/api/update", HTTP_POST, handleUpdateResult, handleUpdateUpload);
     server.begin();
     Serial.println("Web server started on port 80");
 
