@@ -84,8 +84,15 @@ float    lastPctChange         = 0;
 int      partialCount          = 0;
 int      consecutiveFails      = 0;
 unsigned long bootTime         = 0;
+bool     otaActive             = false;
+bool     otaNeedsRender        = false;
+bool     otaDisplayReady       = false;
+bool     otaFailed             = false;
+int      otaProgressPct        = 0;
+unsigned long otaLastRenderMs  = 0;
 const unsigned long WIFI_RETRY_MS = 60000;    // retry STA every 60s when in AP mode
 const unsigned long WIFI_CHECK_MS = 15000;    // check WiFi health every 15s
+const unsigned long OTA_RENDER_INTERVAL_MS = 800;
 unsigned long lastWifiCheckMs  = 0;
 const int MAX_CONSECUTIVE_FAILS = 3;          // force WiFi reset after this many
 
@@ -108,6 +115,8 @@ WebServer server(80);
 // ─── FORWARD DECLARATIONS ──────────────────────────────
 void startAPMode();
 void setupWebServer();
+void renderOtaProgressScreen(int pct, bool failed);
+void updateOtaDisplay(bool forceFullRefresh);
 
 // ═══════════════════════════════════════════════════════
 // 5x7 FONT
@@ -1128,18 +1137,28 @@ function uploadFirmware() {
   const pct = document.getElementById('fwPct');
   progress.style.display = 'block';
 
-  xhr.upload.onprogress = function(e) {
-    if (e.lengthComputable) {
-      const p = Math.round(e.loaded / e.total * 100);
-      bar.style.width = p + '%';
-      pct.textContent = p + '%';
-    }
+  let pollTimer = null;
+  const setPct = (p) => {
+    const v = Math.max(0, Math.min(100, Number(p) || 0));
+    bar.style.width = v + '%';
+    pct.textContent = v + '%';
+  };
+
+  const startPoll = () => {
+    pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch('/api/status');
+        if (!r.ok) return;
+        const d = await r.json();
+        if (typeof d.otaProgress === 'number') setPct(d.otaProgress);
+      } catch(e) {}
+    }, 500);
   };
 
   xhr.onload = function() {
+    if (pollTimer) clearInterval(pollTimer);
     if (xhr.status === 200) {
-      bar.style.width = '100%';
-      pct.textContent = '100%';
+      setPct(100);
       toast('Firmware updated — rebooting...');
       setTimeout(function() { location.reload(); }, 10000);
     } else {
@@ -1147,9 +1166,13 @@ function uploadFirmware() {
     }
   };
 
-  xhr.onerror = function() { toast('Upload error', true); };
+  xhr.onerror = function() {
+    if (pollTimer) clearInterval(pollTimer);
+    toast('Upload error', true);
+  };
 
   xhr.open('POST', '/api/update');
+  startPoll();
   xhr.send(formData);
 }
 
@@ -1202,6 +1225,9 @@ void handleStatus() {
     json += "\"timeSpan\":\"" + String(span) + "\",";
     json += "\"uptime\":\"" + String(uptimeStr) + "\",";
     json += "\"fails\":" + String(consecutiveFails) + ",";
+    json += "\"otaActive\":" + String(otaActive ? "true" : "false") + ",";
+    json += "\"otaProgress\":" + String(otaProgressPct) + ",";
+    json += "\"otaFailed\":" + String(otaFailed ? "true" : "false") + ",";
     json += "\"heap\":" + String(ESP.getFreeHeap());
     json += "}";
     server.send(200, "application/json", json);
@@ -1307,33 +1333,79 @@ void handleDisplayBMP() {
 void handleUpdateResult() {
     server.sendHeader("Connection", "close");
     if (Update.hasError()) {
+        otaFailed = true;
+        otaActive = false;
+        otaProgressPct = 0;
+        otaNeedsRender = true;
+        updateOtaDisplay(true);
+        if (otaDisplayReady) {
+            epd.Sleep();
+            otaDisplayReady = false;
+        }
         server.send(500, "application/json", "{\"error\":\"Update failed\"}");
     } else {
+        otaProgressPct = 100;
+        otaNeedsRender = true;
+        updateOtaDisplay(true);
+        if (otaDisplayReady) {
+            epd.Sleep();
+            otaDisplayReady = false;
+        }
+        otaActive = false;
         server.send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting...\"}");
-        delay(1000);
+        delay(1200);
         ESP.restart();
     }
 }
+
 
 void handleUpdateUpload() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         Serial.printf("OTA update: %s\n", upload.filename.c_str());
+        otaActive = true;
+        otaFailed = false;
+        otaProgressPct = 0;
+        otaNeedsRender = true;
+        otaLastRenderMs = 0;
+
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
             Update.printError(Serial);
+            otaFailed = true;
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
             Update.printError(Serial);
+            otaFailed = true;
+        }
+
+        size_t total = Update.size();
+        if (total > 0) {
+            otaProgressPct = (int)((Update.progress() * 100UL) / total);
+            otaProgressPct = constrain(otaProgressPct, 0, 100);
+        }
+
+        if ((millis() - otaLastRenderMs >= OTA_RENDER_INTERVAL_MS) || otaProgressPct >= 100) {
+            otaNeedsRender = true;
         }
     } else if (upload.status == UPLOAD_FILE_END) {
         if (!Update.end(true)) {
             Update.printError(Serial);
+            otaFailed = true;
         } else {
+            otaProgressPct = 100;
+            otaNeedsRender = true;
             Serial.println("OTA update complete");
         }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        Update.abort();
+        otaFailed = true;
+        otaNeedsRender = true;
+        otaActive = false;
+        Serial.println("OTA update aborted");
     }
 }
+
 
 void setupWebServer() {
     server.on("/",          HTTP_GET,  handleRoot);
@@ -1864,6 +1936,75 @@ void showWifiFailScreen() {
     renderStatusScreen("WIFI DISCONNECTED", l1, l2, l3, l4);
 }
 
+
+void renderOtaProgressScreen(int pct, bool failed) {
+    pct = constrain(pct, 0, 100);
+    bufClear();
+
+    // Framed splash panel
+    int bx = 90, by = 110, bw = 620, bh = 260;
+    drawRect(bx, by, bw, bh);
+    drawRect(bx + 1, by + 1, bw - 2, bh - 2);
+
+    const char* title = failed ? "OTA UPDATE FAILED" : "FIRMWARE UPDATE";
+    drawString(bx + (bw - (int)strlen(title) * 12) / 2, by + 24, title, 2);
+    hLine(bx + 24, bx + bw - 24, by + 56);
+
+    const char* subtitle = failed ? "Please retry from Web GUI" : "Writing firmware to flash...";
+    drawString(bx + (bw - (int)strlen(subtitle) * 6) / 2, by + 78, subtitle, 1);
+
+    int barX = bx + 60;
+    int barY = by + 130;
+    int barW = bw - 120;
+    int barH = 44;
+    int innerPad = 4;
+
+    // Modern-ish progress bar with inline percent
+    drawRect(barX, barY, barW, barH);
+    drawRect(barX + 1, barY + 1, barW - 2, barH - 2);
+
+    int fillW = (barW - 2 * innerPad - 2) * pct / 100;
+    if (fillW > 0) fillRect(barX + innerPad + 1, barY + innerPad + 1, fillW, barH - 2 * innerPad - 2, true);
+
+    for (int t = 10; t < 100; t += 10) {
+        int tx = barX + 1 + (barW - 2) * t / 100;
+        vLine(tx, barY + barH - 8, barY + barH - 4);
+    }
+
+    char pctStr[12];
+    snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+    drawString(barX + (barW - (int)strlen(pctStr) * 12) / 2, barY + barH + 16, pctStr, 2);
+
+    const char* footer = failed ? "Device remains online for another upload" : "Do not power off the device";
+    drawString(bx + (bw - (int)strlen(footer) * 6) / 2, by + bh - 28, footer, 1);
+}
+
+void updateOtaDisplay(bool forceFullRefresh) {
+    if (!otaNeedsRender) return;
+
+    if (!otaDisplayReady) {
+        Serial.println("OTA display init...");
+        if (epd.Init() != 0) {
+            Serial.println("OTA display init failed");
+            return;
+        }
+        otaDisplayReady = true;
+        memset(oldbuf, 0xFF, BUF_SIZE);
+    }
+
+    renderOtaProgressScreen(otaProgressPct, otaFailed);
+
+    if (forceFullRefresh) {
+        epd.DisplayFrame(framebuf);
+    } else {
+        epd.DisplayFramePartial(oldbuf, framebuf);
+    }
+    memcpy(oldbuf, framebuf, BUF_SIZE);
+
+    otaNeedsRender = false;
+    otaLastRenderMs = millis();
+}
+
 int choosePriceLabelDecimals(float priceLo, float priceRange) {
     float step = priceRange / 5.0f;
     for (int decimals = 2; decimals <= 6; decimals++) {
@@ -2208,6 +2349,16 @@ void setup() {
 void loop() {
     // Service web server continuously (works on AP or STA)
     server.handleClient();
+
+    if (otaNeedsRender) {
+        bool forceFull = !otaDisplayReady || otaFailed || otaProgressPct >= 100;
+        updateOtaDisplay(forceFull);
+    }
+
+    if (otaActive) {
+        delay(5);
+        return;
+    }
 
     // ── WiFi keepalive check every 15s ──
     if (!apModeActive && (millis() - lastWifiCheckMs >= WIFI_CHECK_MS)) {
