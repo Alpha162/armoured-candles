@@ -798,9 +798,17 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     <div class="card-head"><span class="icon">&#8679;</span><h2>Firmware Update</h2></div>
     <div class="card-body">
       <div class="field">
+        <label>Safety unlock</label>
+        <input type="range" id="fwUnlock" min="0" max="100" value="0"
+               oninput="onFirmwareUnlockSlide(this.value)"
+               onmouseup="onFirmwareUnlockRelease()" ontouchend="onFirmwareUnlockRelease()"
+               style="width:100%">
+        <div class="hint" id="fwUnlockHint">Slide all the way right to unlock firmware update and arm on-device update screen</div>
+      </div>
+      <div class="field">
         <label>Upload .bin file</label>
-        <input type="file" id="fwFile" accept=".bin"
-               style="width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text-bright);font-family:'JetBrains Mono',monospace;font-size:0.85em">
+        <input type="file" id="fwFile" accept=".bin" disabled
+               style="width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text-bright);font-family:'JetBrains Mono',monospace;font-size:0.85em;opacity:.65;cursor:not-allowed">
         <div class="hint">Arduino IDE: Sketch &rarr; Export Compiled Binary, then upload the .bin file here</div>
       </div>
       <div id="fwProgress" style="display:none;margin-top:10px">
@@ -810,7 +818,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
           </div>
         </div>
       </div>
-      <button class="btn" onclick="uploadFirmware()" style="margin-top:10px;width:100%;justify-content:center">
+      <button id="fwUploadBtn" class="btn" onclick="uploadFirmware()" disabled style="margin-top:10px;width:100%;justify-content:center;opacity:.65;cursor:not-allowed">
         &#8679; Upload &amp; Install
       </button>
     </div>
@@ -1122,8 +1130,58 @@ function refreshPreview() {
 }
 setInterval(refreshPreview, 30000);
 
+
+let firmwareUnlocked = false;
+let firmwareUnlockPending = false;
+
+function setFirmwareUnlocked(unlocked) {
+  firmwareUnlocked = !!unlocked;
+  const fileInput = document.getElementById('fwFile');
+  const btn = document.getElementById('fwUploadBtn');
+  const hint = document.getElementById('fwUnlockHint');
+  fileInput.disabled = !firmwareUnlocked;
+  btn.disabled = !firmwareUnlocked;
+  fileInput.style.opacity = firmwareUnlocked ? '1' : '.65';
+  btn.style.opacity = firmwareUnlocked ? '1' : '.65';
+  fileInput.style.cursor = firmwareUnlocked ? 'pointer' : 'not-allowed';
+  btn.style.cursor = firmwareUnlocked ? 'pointer' : 'not-allowed';
+  hint.textContent = firmwareUnlocked
+    ? 'Firmware update unlocked. Device display is now in update-ready mode.'
+    : 'Slide all the way right to unlock firmware update and arm on-device update screen';
+}
+
+async function armFirmwareUpdateScreen() {
+  if (firmwareUnlockPending || firmwareUnlocked) return;
+  firmwareUnlockPending = true;
+  try {
+    const r = await fetch('/api/update/arm', {method:'POST'});
+    if (!r.ok) throw new Error('arm failed');
+    setFirmwareUnlocked(true);
+    toast('Firmware update unlocked');
+  } catch(e) {
+    const slider = document.getElementById('fwUnlock');
+    slider.value = 0;
+    setFirmwareUnlocked(false);
+    toast('Unable to unlock update mode', true);
+  } finally {
+    firmwareUnlockPending = false;
+  }
+}
+
+function onFirmwareUnlockSlide(v) {
+  if (firmwareUnlocked) return;
+  if (Number(v) < 96) return;
+  armFirmwareUpdateScreen();
+}
+
+function onFirmwareUnlockRelease() {
+  const slider = document.getElementById('fwUnlock');
+  if (!firmwareUnlocked) slider.value = 0;
+}
+
 function uploadFirmware() {
   const fileInput = document.getElementById('fwFile');
+  if (!firmwareUnlocked) { toast('Slide to unlock firmware update first', true); return; }
   if (!fileInput.files.length) { toast('Select a .bin file first', true); return; }
   if (!confirm('Upload firmware and reboot?')) return;
 
@@ -1131,6 +1189,7 @@ function uploadFirmware() {
   const formData = new FormData();
   formData.append('update', file);
 
+  document.getElementById('fwUnlock').disabled = true;
   const xhr = new XMLHttpRequest();
   const progress = document.getElementById('fwProgress');
   const bar = document.getElementById('fwBar');
@@ -1162,6 +1221,7 @@ function uploadFirmware() {
       toast('Firmware updated — rebooting...');
       setTimeout(function() { location.reload(); }, 10000);
     } else {
+      document.getElementById('fwUnlock').disabled = false;
       toast('Update failed: ' + xhr.responseText, true);
     }
   };
@@ -1176,6 +1236,7 @@ function uploadFirmware() {
   xhr.send(formData);
 }
 
+setFirmwareUnlocked(false);
 loadConfig();
 setInterval(loadConfig, 30000);
 </script>
@@ -1330,6 +1391,16 @@ void handleDisplayBMP() {
 
 // ── OTA firmware update via browser upload ──
 
+
+void handleUpdateArm() {
+    otaArmed = true;
+    otaFailed = false;
+    otaActive = false;
+    otaProgressPct = 0;
+    otaNeedsRender = true;
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
 void handleUpdateResult() {
     server.sendHeader("Connection", "close");
     if (Update.hasError()) {
@@ -1414,6 +1485,7 @@ void setupWebServer() {
     server.on("/api/refresh",HTTP_POST,handleRefresh);
     server.on("/api/restart",HTTP_POST,handleRestart);
     server.on("/api/display",HTTP_GET, handleDisplayBMP);
+    server.on("/api/update/arm", HTTP_POST, handleUpdateArm);
     server.on("/api/update", HTTP_POST, handleUpdateResult, handleUpdateUpload);
     server.begin();
     Serial.println("Web server started on port 80");
