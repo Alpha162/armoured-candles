@@ -1864,6 +1864,28 @@ void showWifiFailScreen() {
     renderStatusScreen("WIFI DISCONNECTED", l1, l2, l3, l4);
 }
 
+int choosePriceLabelDecimals(float priceLo, float priceRange) {
+    float step = priceRange / 5.0f;
+    for (int decimals = 2; decimals <= 6; decimals++) {
+        float scale = powf(10.0f, (float)decimals);
+        long prev = 0;
+        bool hasPrev = false;
+        bool distinct = true;
+        for (int g = 0; g <= 5; g++) {
+            float price = priceLo + step * g;
+            long rounded = lroundf(price * scale);
+            if (hasPrev && rounded == prev) {
+                distinct = false;
+                break;
+            }
+            prev = rounded;
+            hasPrev = true;
+        }
+        if (distinct) return decimals;
+    }
+    return 6;
+}
+
 void renderChart() {
     bufClear();
 
@@ -1931,14 +1953,19 @@ void renderChart() {
     hLine(0, SCR_W - 1, MARGIN_T - 2);
 
     // ── Price grid ──
+    int priceLabelDecimals = choosePriceLabelDecimals(priceLo, priceRange);
+    char priceFmt[8];
+    snprintf(priceFmt, sizeof(priceFmt), "%%.%df", priceLabelDecimals);
+
     for (int g = 0; g <= 5; g++) {
         float price = priceLo + priceRange * g / 5;
         int y = priceToY(price);
         if (y >= MARGIN_T && y <= MARGIN_T + CHART_H) {
             hLineDash(MARGIN_L, MARGIN_L + CHART_W, y);
             char lbl[16];
-            snprintf(lbl, sizeof(lbl), "%.2f", price);
-            drawString(MARGIN_L + CHART_W + 5, y - 3, lbl, 1);
+            snprintf(lbl, sizeof(lbl), priceFmt, price);
+            int lblY = constrain(y - 3, MARGIN_T + 1, MARGIN_T + CHART_H - 7);
+            drawString(MARGIN_L + CHART_W + 5, lblY, lbl, 1);
         }
     }
 
