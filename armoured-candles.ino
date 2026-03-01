@@ -1913,8 +1913,9 @@ void renderChart() {
     priceHi += pad; priceLo -= pad;
     priceRange = priceHi - priceLo;
 
+    float priceToYPx = (float)CHART_H / priceRange;
     auto priceToY = [&](float p) -> int {
-        return MARGIN_T + CHART_H - (int)((p - priceLo) / priceRange * CHART_H);
+        return MARGIN_T + CHART_H - (int)((p - priceLo) * priceToYPx);
     };
 
     // ── Title bar ──
