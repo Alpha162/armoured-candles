@@ -1,9 +1,12 @@
 /**
- * Hyperliquid Candlestick Chart — E-Paper Display
+ * Multi-Exchange Candlestick Chart — E-Paper Display
  * XIAO ESP32-S3 + Waveshare 7.5" V2 (Driver HAT Rev 2.3)
+ *
+ * Supported exchanges: Hyperliquid, Binance, AsterDEX, Kraken, Poloniex
  *
  * Features:
  *   - Web config UI at http://epdchart.local (or device IP)
+ *   - Searchable coin dropdown (pairs fetched client-side)
  *   - All settings persist across reboots via NVS
  *   - Auto candle count scaling per interval
  *   - EMA, RSI, Volume overlays
@@ -53,6 +56,7 @@ Preferences prefs;
 
 char     cfgSSID[64]      = "YOUR_SSID";
 char     cfgPass[64]      = "YOUR_PASSWORD";
+char     cfgExchange[16]  = "hyperliquid";
 char     cfgCoin[16]      = "ETH";
 char     cfgInterval[8]   = "5m";
 int      cfgNumCandles    = 60;
@@ -389,6 +393,41 @@ void timeSpanStr(const char* iv, int count, char* out, int outLen) {
 }
 
 // ═══════════════════════════════════════════════════════
+// EXCHANGE HELPERS — interval & symbol conversion
+// ═══════════════════════════════════════════════════════
+
+// Convert common interval format to Kraken minutes string
+void krakenInterval(const char* iv, char* out, int outLen) {
+    if (strcmp(iv, "1m") == 0)       strncpy(out, "1", outLen);
+    else if (strcmp(iv, "5m") == 0)  strncpy(out, "5", outLen);
+    else if (strcmp(iv, "15m") == 0) strncpy(out, "15", outLen);
+    else if (strcmp(iv, "30m") == 0) strncpy(out, "30", outLen);
+    else if (strcmp(iv, "1h") == 0)  strncpy(out, "60", outLen);
+    else if (strcmp(iv, "4h") == 0)  strncpy(out, "240", outLen);
+    else if (strcmp(iv, "1d") == 0)  strncpy(out, "1440", outLen);
+    else if (strcmp(iv, "1w") == 0)  strncpy(out, "10080", outLen);
+    else                             strncpy(out, "60", outLen);  // fallback
+}
+
+// Convert common interval format to Poloniex format
+void poloniexInterval(const char* iv, char* out, int outLen) {
+    if (strcmp(iv, "1m") == 0)       strncpy(out, "MINUTE_1", outLen);
+    else if (strcmp(iv, "5m") == 0)  strncpy(out, "MINUTE_5", outLen);
+    else if (strcmp(iv, "15m") == 0) strncpy(out, "MINUTE_15", outLen);
+    else if (strcmp(iv, "30m") == 0) strncpy(out, "MINUTE_30", outLen);
+    else if (strcmp(iv, "1h") == 0)  strncpy(out, "HOUR_1", outLen);
+    else if (strcmp(iv, "2h") == 0)  strncpy(out, "HOUR_2", outLen);
+    else if (strcmp(iv, "4h") == 0)  strncpy(out, "HOUR_4", outLen);
+    else if (strcmp(iv, "6h") == 0)  strncpy(out, "HOUR_6", outLen);
+    else if (strcmp(iv, "12h") == 0) strncpy(out, "HOUR_12", outLen);
+    else if (strcmp(iv, "1d") == 0)  strncpy(out, "DAY_1", outLen);
+    else if (strcmp(iv, "3d") == 0)  strncpy(out, "DAY_3", outLen);
+    else if (strcmp(iv, "1w") == 0)  strncpy(out, "WEEK_1", outLen);
+    else if (strcmp(iv, "1M") == 0)  strncpy(out, "MONTH_1", outLen);
+    else                             strncpy(out, "HOUR_1", outLen);  // fallback
+}
+
+// ═══════════════════════════════════════════════════════
 // NVS PERSISTENCE
 // ═══════════════════════════════════════════════════════
 
@@ -397,6 +436,7 @@ void loadConfig() {
     String s;
     s = prefs.getString("ssid", cfgSSID);       strncpy(cfgSSID, s.c_str(), sizeof(cfgSSID) - 1);
     s = prefs.getString("pass", cfgPass);        strncpy(cfgPass, s.c_str(), sizeof(cfgPass) - 1);
+    s = prefs.getString("exchange", cfgExchange);  strncpy(cfgExchange, s.c_str(), sizeof(cfgExchange) - 1);
     s = prefs.getString("coin", cfgCoin);        strncpy(cfgCoin, s.c_str(), sizeof(cfgCoin) - 1);
     s = prefs.getString("interval", cfgInterval);strncpy(cfgInterval, s.c_str(), sizeof(cfgInterval) - 1);
     cfgNumCandles   = prefs.getInt("numCandles", cfgNumCandles);
@@ -416,6 +456,7 @@ void saveConfig() {
     prefs.begin("epdchart", false);  // read-write
     prefs.putString("ssid", cfgSSID);
     prefs.putString("pass", cfgPass);
+    prefs.putString("exchange", cfgExchange);
     prefs.putString("coin", cfgCoin);
     prefs.putString("interval", cfgInterval);
     prefs.putInt("numCandles", cfgNumCandles);
@@ -567,6 +608,22 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   .toast.error{border-color:var(--red);background:var(--red-dim);color:var(--red)}
   .toast.show{transform:translateX(-50%) translateY(0)}
 
+  .coin-wrap{position:relative}
+  .coin-wrap input[type=text]{padding-right:30px}
+  .coin-dd{
+    display:none;position:absolute;top:100%;left:0;right:0;z-index:20;
+    max-height:220px;overflow-y:auto;
+    background:var(--bg);border:1px solid var(--accent);border-top:0;border-radius:0 0 6px 6px;
+  }
+  .coin-dd.open{display:block}
+  .coin-dd .coin-item{
+    padding:7px 12px;font-family:'JetBrains Mono',monospace;font-size:0.82em;
+    color:var(--text);cursor:pointer;
+  }
+  .coin-dd .coin-item:hover,.coin-dd .coin-item.hl{background:var(--accent-dim);color:var(--accent)}
+  .coin-dd .coin-empty{padding:10px 12px;font-size:0.78em;color:var(--text-dim);font-style:italic}
+  .coin-loading{padding:10px 12px;font-size:0.78em;color:var(--accent);font-family:'JetBrains Mono',monospace}
+
   @media(max-width:480px){
     .row{flex-direction:column;gap:0}
     .header{padding:14px 16px}
@@ -604,22 +661,28 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   <div class="card">
     <div class="card-head"><span class="icon">&#9670;</span><h2>Chart</h2></div>
     <div class="card-body">
+      <div class="field">
+        <label>Exchange</label>
+        <select id="exchange">
+          <option value="hyperliquid">Hyperliquid</option>
+          <option value="binance">Binance</option>
+          <option value="asterdex">AsterDEX</option>
+          <option value="kraken">Kraken</option>
+          <option value="poloniex">Poloniex</option>
+        </select>
+      </div>
       <div class="row">
         <div class="field">
           <label>Coin</label>
-          <input type="text" id="coin" placeholder="ETH">
+          <div class="coin-wrap">
+            <input type="text" id="coinSearch" placeholder="Search coins..." autocomplete="off">
+            <input type="hidden" id="coin" value="ETH">
+            <div class="coin-dd" id="coinDropdown"></div>
+          </div>
         </div>
         <div class="field">
           <label>Interval</label>
-          <select id="interval">
-            <option value="1m">1m</option><option value="3m">3m</option>
-            <option value="5m">5m</option><option value="15m">15m</option>
-            <option value="30m">30m</option><option value="1h">1h</option>
-            <option value="2h">2h</option><option value="4h">4h</option>
-            <option value="8h">8h</option><option value="12h">12h</option>
-            <option value="1d">1d</option><option value="3d">3d</option>
-            <option value="1w">1w</option><option value="1M">1M</option>
-          </select>
+          <select id="interval"></select>
         </div>
       </div>
 
@@ -756,6 +819,17 @@ const IV_MINS = {
   '1m':1,'3m':3,'5m':5,'15m':15,'30m':30,'1h':60,'2h':120,'4h':240,
   '8h':480,'12h':720,'1d':1440,'3d':4320,'1w':10080,'1M':43200
 };
+const EX_INTERVALS = {
+  hyperliquid:['1m','3m','5m','15m','30m','1h','2h','4h','8h','12h','1d','3d','1w','1M'],
+  binance:['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'],
+  asterdex:['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'],
+  kraken:['1m','5m','15m','30m','1h','4h','1d','1w'],
+  poloniex:['1m','5m','15m','30m','1h','2h','4h','6h','12h','1d','3d','1w','1M']
+};
+
+let coinList = [];
+let coinCache = {};
+let hlIdx = -1;
 
 function fmtSpan(iv, n) {
   const totalMin = (IV_MINS[iv]||5) * n;
@@ -766,15 +840,158 @@ function fmtSpan(iv, n) {
 
 function updateAutoInfo() {
   const iv = document.getElementById('interval').value;
+  if (!iv) return;
   const isAuto = document.getElementById('autoCandles').checked;
   const n = isAuto ? (AUTO_MAP[iv]||60) : parseInt(document.getElementById('numCandles').value)||60;
   const span = fmtSpan(iv, n);
-  document.getElementById('autoInfo').innerHTML = isAuto
-    ? '&#x25B6; ' + n + ' candles &times; ' + iv + ' = <strong>' + span + '</strong> window'
-    : '&#x25B6; ' + n + ' candles &times; ' + iv + ' = <strong>' + span + '</strong> window';
+  document.getElementById('autoInfo').innerHTML =
+    '&#x25B6; ' + n + ' candles &times; ' + iv + ' = <strong>' + span + '</strong> window';
   document.getElementById('manualCandleField').style.display = isAuto ? 'none' : 'block';
   if (isAuto) document.getElementById('numCandles').value = n;
 }
+
+// ── Interval dropdown rebuild per exchange ──
+function rebuildIntervals(ex, currentIv) {
+  const sel = document.getElementById('interval');
+  const ivs = EX_INTERVALS[ex] || EX_INTERVALS.hyperliquid;
+  sel.innerHTML = '';
+  ivs.forEach(function(v) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = v;
+    sel.appendChild(o);
+  });
+  if (ivs.indexOf(currentIv) >= 0) sel.value = currentIv;
+  else sel.value = '1h';
+  updateAutoInfo();
+}
+
+// ── Coin dropdown: fetch pairs from exchange API (client-side) ──
+async function fetchPairs(ex) {
+  if (coinCache[ex]) { coinList = coinCache[ex]; return; }
+  const dd = document.getElementById('coinDropdown');
+  dd.innerHTML = '<div class="coin-loading">Loading pairs...</div>';
+  dd.classList.add('open');
+  try {
+    let list = [];
+    if (ex === 'hyperliquid') {
+      const r = await fetch('https://api.hyperliquid.xyz/info', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:'{"type":"meta"}'
+      });
+      const d = await r.json();
+      list = (d.universe||[]).map(function(x){return x.name;});
+    } else if (ex === 'binance') {
+      const r = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+      const d = await r.json();
+      list = (d.symbols||[]).filter(function(s){return s.quoteAsset==='USDT'&&s.status==='TRADING';})
+        .map(function(s){return s.baseAsset;});
+    } else if (ex === 'asterdex') {
+      const r = await fetch('https://fapi.asterdex.com/fapi/v3/exchangeInfo');
+      const d = await r.json();
+      list = (d.symbols||[]).filter(function(s){return s.quoteAsset==='USDT'&&s.status==='TRADING';})
+        .map(function(s){return s.baseAsset;});
+    } else if (ex === 'kraken') {
+      const r = await fetch('https://api.kraken.com/0/public/AssetPairs');
+      const d = await r.json();
+      const pairs = d.result||{};
+      const seen = {};
+      Object.keys(pairs).forEach(function(k){
+        const p = pairs[k];
+        const q = (p.quote||'').replace(/^Z/,'');
+        if (q==='USD'||q==='USDT') {
+          const b = (p.base||'').replace(/^X/,'');
+          if (!seen[b]) { seen[b]=1; list.push(b); }
+        }
+      });
+    } else if (ex === 'poloniex') {
+      const r = await fetch('https://api.poloniex.com/markets');
+      const d = await r.json();
+      list = d.filter(function(m){return m.symbol&&m.symbol.endsWith('_USDT');})
+        .map(function(m){return m.symbol.split('_')[0];});
+    }
+    list.sort();
+    // deduplicate
+    list = list.filter(function(v,i,a){return i===0||v!==a[i-1];});
+    coinCache[ex] = list;
+    coinList = list;
+  } catch(e) {
+    console.error('Failed to fetch pairs:', e);
+    coinList = [];
+  }
+  dd.classList.remove('open');
+}
+
+function renderCoinDropdown(filter) {
+  const dd = document.getElementById('coinDropdown');
+  const q = (filter||'').toUpperCase();
+  const matches = q ? coinList.filter(function(c){return c.toUpperCase().indexOf(q)>=0;}) : coinList;
+  const show = matches.slice(0, 50);
+  hlIdx = -1;
+  if (show.length === 0) {
+    dd.innerHTML = '<div class="coin-empty">' + (coinList.length ? 'No matches' : 'No pairs loaded') + '</div>';
+  } else {
+    dd.innerHTML = show.map(function(c){
+      return '<div class="coin-item" data-coin="'+c+'">'+c+'</div>';
+    }).join('');
+  }
+  dd.classList.add('open');
+}
+
+function selectCoin(name) {
+  document.getElementById('coin').value = name;
+  document.getElementById('coinSearch').value = name;
+  document.getElementById('coinDropdown').classList.remove('open');
+}
+
+// Coin search input events
+const coinSearchEl = document.getElementById('coinSearch');
+const coinDdEl = document.getElementById('coinDropdown');
+
+coinSearchEl.addEventListener('focus', function() {
+  renderCoinDropdown(coinSearchEl.value);
+});
+coinSearchEl.addEventListener('input', function() {
+  renderCoinDropdown(coinSearchEl.value);
+});
+coinSearchEl.addEventListener('keydown', function(e) {
+  const items = coinDdEl.querySelectorAll('.coin-item');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    hlIdx = Math.min(hlIdx+1, items.length-1);
+    items.forEach(function(el,i){el.classList.toggle('hl',i===hlIdx);});
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    hlIdx = Math.max(hlIdx-1, 0);
+    items.forEach(function(el,i){el.classList.toggle('hl',i===hlIdx);});
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (hlIdx >= 0 && hlIdx < items.length) selectCoin(items[hlIdx].dataset.coin);
+    else if (coinSearchEl.value.trim()) selectCoin(coinSearchEl.value.trim().toUpperCase());
+  } else if (e.key === 'Escape') {
+    coinDdEl.classList.remove('open');
+  }
+});
+
+coinDdEl.addEventListener('click', function(e) {
+  const item = e.target.closest('.coin-item');
+  if (item) selectCoin(item.dataset.coin);
+});
+
+// Close dropdown on outside click
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.coin-wrap')) coinDdEl.classList.remove('open');
+});
+
+// Exchange change handler
+document.getElementById('exchange').addEventListener('change', async function() {
+  const ex = this.value;
+  rebuildIntervals(ex, document.getElementById('interval').value);
+  await fetchPairs(ex);
+  // Clear coin selection when switching exchange
+  document.getElementById('coin').value = '';
+  document.getElementById('coinSearch').value = '';
+  renderCoinDropdown('');
+});
 
 document.getElementById('interval').addEventListener('change', updateAutoInfo);
 document.getElementById('autoCandles').addEventListener('change', updateAutoInfo);
@@ -784,15 +1001,21 @@ function toast(msg, err) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = 'toast' + (err ? ' error' : '') + ' show';
-  setTimeout(() => t.className = 'toast', 2500);
+  setTimeout(function(){t.className='toast';}, 2500);
 }
 
+let configLoaded = false;
 async function loadConfig() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
+
+    const ex = d.exchange || 'hyperliquid';
+    document.getElementById('exchange').value = ex;
+    rebuildIntervals(ex, d.interval || '5m');
+
     document.getElementById('coin').value = d.coin || '';
-    document.getElementById('interval').value = d.interval || '5m';
+    document.getElementById('coinSearch').value = d.coin || '';
     document.getElementById('autoCandles').checked = d.autoCandles;
     document.getElementById('numCandles').value = d.numCandles || 60;
     document.getElementById('refreshMin').value = d.refreshMin || 5;
@@ -803,7 +1026,6 @@ async function loadConfig() {
     document.getElementById('fullRefEvery').value = d.fullRefEvery || 10;
     document.getElementById('partialPct').value = d.partialPct || 40;
     document.getElementById('ssid').value = d.ssid || '';
-    // don't populate password for security
 
     document.getElementById('pillIp').textContent = d.apMode ? ('AP: ' + d.apIP) : d.ip;
     if (d.apMode) {
@@ -828,11 +1050,18 @@ async function loadConfig() {
     }
 
     updateAutoInfo();
+
+    // Fetch pairs on first load
+    if (!configLoaded) {
+      configLoaded = true;
+      await fetchPairs(ex);
+    }
   } catch(e) { console.error(e); }
 }
 
 async function saveConfig() {
   const body = {
+    exchange: document.getElementById('exchange').value,
     coin: document.getElementById('coin').value.toUpperCase().trim(),
     interval: document.getElementById('interval').value,
     autoCandles: document.getElementById('autoCandles').checked,
@@ -868,14 +1097,12 @@ async function rebootDevice() {
   } catch(e) { toast('Rebooting...'); }
 }
 
-// Display preview auto-refresh
 function refreshPreview() {
   const img = document.getElementById('displayPreview');
   img.src = '/api/display?t=' + Date.now();
 }
 setInterval(refreshPreview, 30000);
 
-// Firmware upload
 function uploadFirmware() {
   const fileInput = document.getElementById('fwFile');
   if (!fileInput.files.length) { toast('Select a .bin file first', true); return; }
@@ -942,6 +1169,7 @@ void handleStatus() {
     snprintf(uptimeStr, sizeof(uptimeStr), "%dh %dm", uh, um);
 
     String json = "{";
+    json += "\"exchange\":\"" + String(cfgExchange) + "\",";
     json += "\"coin\":\"" + String(cfgCoin) + "\",";
     json += "\"interval\":\"" + String(cfgInterval) + "\",";
     json += "\"autoCandles\":" + String(cfgAutoCandles ? "true" : "false") + ",";
@@ -981,6 +1209,7 @@ void handleConfigPost() {
         return;
     }
 
+    if (doc.containsKey("exchange"))    strncpy(cfgExchange, doc["exchange"].as<const char*>(), sizeof(cfgExchange) - 1);
     if (doc.containsKey("coin"))        strncpy(cfgCoin, doc["coin"].as<const char*>(), sizeof(cfgCoin) - 1);
     if (doc.containsKey("interval"))    strncpy(cfgInterval, doc["interval"].as<const char*>(), sizeof(cfgInterval) - 1);
     if (doc.containsKey("autoCandles")) cfgAutoCandles  = doc["autoCandles"].as<bool>();
@@ -1278,31 +1507,39 @@ bool ensureTimeSync() {
     return (now > 1700000000);
 }
 
-bool fetchCandles() {
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi not connected");
-        return false;
+// ── Common HTTP error logger ──
+void logHttpError(int httpCode) {
+    Serial.printf("HTTP %d | WiFi:%s RSSI:%d Heap:%d\n",
+                  httpCode,
+                  (WiFi.status() == WL_CONNECTED) ? "OK" : "DOWN",
+                  WiFi.RSSI(),
+                  ESP.getFreeHeap());
+    if (httpCode < 0) {
+        HTTPClient tmp;
+        Serial.printf("  Error: %s\n", tmp.errorToString(httpCode).c_str());
     }
+}
 
-    // Guard against unsynchronised clock
-    if (!ensureTimeSync()) {
-        Serial.println("Clock not synced — skipping fetch");
-        return false;
+// ── Post-parse: calculate indicators & cache price ──
+void finalizeCandleData() {
+    Serial.printf("Parsed %d candles\n", candleCount);
+    calcEMA(emaFast, cfgEmaFast);
+    calcEMA(emaSlow, cfgEmaSlow);
+    calcRSI();
+    if (candleCount > 0) {
+        lastPrice = candles[candleCount - 1].c;
+        float firstOpen = candles[0].o;
+        lastPctChange = ((lastPrice - firstOpen) / firstOpen) * 100.0f;
     }
+}
 
-    int numCandles = getNumCandles();
-    uint64_t ivMs = intervalToMs(cfgInterval);
-    uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
-    // Request extra candles for EMA/RSI warmup
-    int requestCount = numCandles + 50;
-    uint64_t startMs = nowMs - (uint64_t)requestCount * ivMs;
-
+// ── Hyperliquid ──────────────────────────────────────
+bool fetchCandlesHyperliquid(int numCandles, uint64_t startMs, uint64_t nowMs) {
     char body[256];
     snprintf(body, sizeof(body),
         "{\"type\":\"candleSnapshot\",\"req\":{\"coin\":\"%s\",\"interval\":\"%s\",\"startTime\":%llu,\"endTime\":%llu}}",
         cfgCoin, cfgInterval, startMs, nowMs);
-
-    Serial.printf("POST: %s\n", body);
+    Serial.printf("Hyperliquid POST: %s\n", body);
 
     HTTPClient http;
     http.begin("https://api.hyperliquid.xyz/info");
@@ -1310,18 +1547,7 @@ bool fetchCandles() {
     http.setTimeout(15000);
 
     int httpCode = http.POST(body);
-    if (httpCode != 200) {
-        Serial.printf("HTTP %d | WiFi:%s RSSI:%d Heap:%d\n",
-                      httpCode,
-                      (WiFi.status() == WL_CONNECTED) ? "OK" : "DOWN",
-                      WiFi.RSSI(),
-                      ESP.getFreeHeap());
-        if (httpCode < 0) {
-            Serial.printf("  Error: %s\n", http.errorToString(httpCode).c_str());
-        }
-        http.end();
-        return false;
-    }
+    if (httpCode != 200) { logHttpError(httpCode); http.end(); return false; }
 
     String payload = http.getString();
     http.end();
@@ -1346,20 +1572,202 @@ bool fetchCandles() {
         candles[candleCount].t = c["t"].as<uint64_t>();
         candleCount++;
     }
+    return candleCount > 0;
+}
 
-    Serial.printf("Parsed %d candles\n", candleCount);
-    calcEMA(emaFast, cfgEmaFast);
-    calcEMA(emaSlow, cfgEmaSlow);
-    calcRSI();
+// ── Binance-format (shared by Binance & AsterDEX) ───
+bool fetchCandlesBinanceFormat(const char* baseUrl, int numCandles, uint64_t startMs, uint64_t nowMs) {
+    char symbol[32];
+    snprintf(symbol, sizeof(symbol), "%sUSDT", cfgCoin);
 
-    // Cache latest price for web UI status
-    if (candleCount > 0) {
-        lastPrice = candles[candleCount - 1].c;
-        float firstOpen = candles[0].o;
-        lastPctChange = ((lastPrice - firstOpen) / firstOpen) * 100.0f;
+    int requestCount = numCandles + 50;
+    if (requestCount > 1000) requestCount = 1000;
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s?symbol=%s&interval=%s&startTime=%llu&endTime=%llu&limit=%d",
+             baseUrl, symbol, cfgInterval, startMs, nowMs, requestCount);
+    Serial.printf("GET: %s\n", url);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(15000);
+
+    int httpCode = http.GET();
+    if (httpCode != 200) { logHttpError(httpCode); http.end(); return false; }
+
+    String payload = http.getString();
+    http.end();
+    Serial.printf("Payload: %d bytes\n", payload.length());
+
+    DynamicJsonDocument doc(98304);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) { Serial.printf("JSON error: %s\n", err.c_str()); return false; }
+
+    JsonArray arr = doc.as<JsonArray>();
+    candleCount = 0;
+    int total = arr.size();
+    int skip = (total > numCandles) ? total - numCandles : 0;
+
+    // Binance klines: [openTime, open, high, low, close, volume, closeTime, ...]
+    for (int i = skip; i < total && candleCount < numCandles; i++) {
+        JsonArray k = arr[i];
+        candles[candleCount].t = k[0].as<uint64_t>();
+        candles[candleCount].o = atof(k[1].as<const char*>());
+        candles[candleCount].h = atof(k[2].as<const char*>());
+        candles[candleCount].l = atof(k[3].as<const char*>());
+        candles[candleCount].c = atof(k[4].as<const char*>());
+        candles[candleCount].v = atof(k[5].as<const char*>());
+        candleCount++;
+    }
+    return candleCount > 0;
+}
+
+// ── Kraken ───────────────────────────────────────────
+bool fetchCandlesKraken(int numCandles, uint64_t startMs) {
+    char pair[32];
+    snprintf(pair, sizeof(pair), "%sUSDT", cfgCoin);
+
+    char ivBuf[8];
+    krakenInterval(cfgInterval, ivBuf, sizeof(ivBuf));
+
+    uint64_t sinceSec = startMs / 1000ULL;
+
+    char url[256];
+    snprintf(url, sizeof(url),
+        "https://api.kraken.com/0/public/OHLC?pair=%s&interval=%s&since=%llu",
+        pair, ivBuf, sinceSec);
+    Serial.printf("GET: %s\n", url);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(15000);
+
+    int httpCode = http.GET();
+    if (httpCode != 200) { logHttpError(httpCode); http.end(); return false; }
+
+    String payload = http.getString();
+    http.end();
+    Serial.printf("Payload: %d bytes\n", payload.length());
+
+    DynamicJsonDocument doc(98304);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) { Serial.printf("JSON error: %s\n", err.c_str()); return false; }
+
+    // Kraken wraps data in {"error":[], "result":{"PAIR":[[...]], "last":...}}
+    JsonObject result = doc["result"];
+    if (result.isNull()) { Serial.println("Kraken: no result object"); return false; }
+
+    // Find the first key that isn't "last"
+    JsonArray arr;
+    for (JsonPair kv : result) {
+        if (strcmp(kv.key().c_str(), "last") != 0) {
+            arr = kv.value().as<JsonArray>();
+            break;
+        }
+    }
+    if (arr.isNull()) { Serial.println("Kraken: no candle array"); return false; }
+
+    candleCount = 0;
+    int total = arr.size();
+    int skip = (total > numCandles) ? total - numCandles : 0;
+
+    // Kraken: [timestamp, open, high, low, close, vwap, volume, count]
+    for (int i = skip; i < total && candleCount < numCandles; i++) {
+        JsonArray k = arr[i];
+        candles[candleCount].t = k[0].as<uint64_t>() * 1000ULL;  // seconds → ms
+        candles[candleCount].o = atof(k[1].as<const char*>());
+        candles[candleCount].h = atof(k[2].as<const char*>());
+        candles[candleCount].l = atof(k[3].as<const char*>());
+        candles[candleCount].c = atof(k[4].as<const char*>());
+        candles[candleCount].v = atof(k[6].as<const char*>());   // index 6 = volume
+        candleCount++;
+    }
+    return candleCount > 0;
+}
+
+// ── Poloniex ─────────────────────────────────────────
+bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
+    char symbol[32];
+    snprintf(symbol, sizeof(symbol), "%s_USDT", cfgCoin);
+
+    char ivBuf[16];
+    poloniexInterval(cfgInterval, ivBuf, sizeof(ivBuf));
+
+    int requestCount = numCandles + 50;
+    if (requestCount > 500) requestCount = 500;
+
+    char url[300];
+    snprintf(url, sizeof(url),
+        "https://api.poloniex.com/markets/%s/candles?interval=%s&startTime=%llu&endTime=%llu&limit=%d",
+        symbol, ivBuf, startMs, nowMs, requestCount);
+    Serial.printf("GET: %s\n", url);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(15000);
+
+    int httpCode = http.GET();
+    if (httpCode != 200) { logHttpError(httpCode); http.end(); return false; }
+
+    String payload = http.getString();
+    http.end();
+    Serial.printf("Payload: %d bytes\n", payload.length());
+
+    DynamicJsonDocument doc(98304);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) { Serial.printf("JSON error: %s\n", err.c_str()); return false; }
+
+    JsonArray arr = doc.as<JsonArray>();
+    candleCount = 0;
+    int total = arr.size();
+    int skip = (total > numCandles) ? total - numCandles : 0;
+
+    for (int i = skip; i < total && candleCount < numCandles; i++) {
+        JsonObject c = arr[i];
+        candles[candleCount].o = atof(c["open"].as<const char*>());
+        candles[candleCount].h = atof(c["high"].as<const char*>());
+        candles[candleCount].l = atof(c["low"].as<const char*>());
+        candles[candleCount].c = atof(c["close"].as<const char*>());
+        candles[candleCount].v = atof(c["quantity"].as<const char*>());
+        candles[candleCount].t = c["startTime"].as<uint64_t>();
+        candleCount++;
+    }
+    return candleCount > 0;
+}
+
+// ── Main dispatcher ──────────────────────────────────
+bool fetchCandles() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi not connected");
+        return false;
+    }
+    if (!ensureTimeSync()) {
+        Serial.println("Clock not synced — skipping fetch");
+        return false;
     }
 
-    return candleCount > 0;
+    int numCandles = getNumCandles();
+    uint64_t ivMs = intervalToMs(cfgInterval);
+    uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
+    int requestCount = numCandles + 50;
+    uint64_t startMs = nowMs - (uint64_t)requestCount * ivMs;
+
+    Serial.printf("Exchange: %s  Coin: %s  Interval: %s\n", cfgExchange, cfgCoin, cfgInterval);
+
+    bool ok = false;
+    if (strcmp(cfgExchange, "binance") == 0)
+        ok = fetchCandlesBinanceFormat("https://api.binance.com/api/v3/klines", numCandles, startMs, nowMs);
+    else if (strcmp(cfgExchange, "asterdex") == 0)
+        ok = fetchCandlesBinanceFormat("https://fapi.asterdex.com/fapi/v3/klines", numCandles, startMs, nowMs);
+    else if (strcmp(cfgExchange, "kraken") == 0)
+        ok = fetchCandlesKraken(numCandles, startMs);
+    else if (strcmp(cfgExchange, "poloniex") == 0)
+        ok = fetchCandlesPoloniex(numCandles, startMs, nowMs);
+    else
+        ok = fetchCandlesHyperliquid(numCandles, startMs, nowMs);
+
+    if (ok) finalizeCandleData();
+    return ok;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1452,8 +1860,17 @@ void renderChart() {
     char pctSign = (pctChange >= 0) ? '+' : '-';
     float absPct = (pctChange < 0) ? -pctChange : pctChange;
 
-    char title[64];
-    snprintf(title, sizeof(title), "%s/USDT  %s", cfgCoin, cfgInterval);
+    // Build short exchange label for display
+    char exLabel[12];
+    if (strcmp(cfgExchange, "hyperliquid") == 0) strncpy(exLabel, "HL", sizeof(exLabel));
+    else if (strcmp(cfgExchange, "binance") == 0) strncpy(exLabel, "BIN", sizeof(exLabel));
+    else if (strcmp(cfgExchange, "asterdex") == 0) strncpy(exLabel, "ASTER", sizeof(exLabel));
+    else if (strcmp(cfgExchange, "kraken") == 0) strncpy(exLabel, "KRK", sizeof(exLabel));
+    else if (strcmp(cfgExchange, "poloniex") == 0) strncpy(exLabel, "POLO", sizeof(exLabel));
+    else strncpy(exLabel, cfgExchange, sizeof(exLabel));
+
+    char title[80];
+    snprintf(title, sizeof(title), "%s:%s/USDT  %s", exLabel, cfgCoin, cfgInterval);
     drawString(MARGIN_L, 5, title, 2);
 
     char legend[48];
