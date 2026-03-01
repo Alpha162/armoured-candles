@@ -35,11 +35,12 @@
 
 // ─── COMPILE-TIME CONSTANTS ────────────────────────────
 #define MAX_CANDLES     200
+#define MAX_SLOTS       4
 #define SCR_W           800
 #define SCR_H           480
 #define BUF_SIZE        (SCR_W / 8 * SCR_H)
 
-// Layout
+// Default layout values (used for full-screen single chart)
 #define MARGIN_L    10
 #define MARGIN_R    85
 #define MARGIN_T    35
@@ -52,29 +53,63 @@
 #define CHART_H     (RSI_TOP - GAP - MARGIN_T)
 #define VOL_TOP     (SCR_H - MARGIN_B - VOL_H)
 
+// ─── MULTI-GRAPH DATA STRUCTURES ───────────────────────
+struct Candle { float o, h, l, c, v; uint64_t t; };
+
+struct Viewport {
+    int x, y, w, h;
+};
+
+struct SlotConfig {
+    char exchange[16];
+    char coin[16];
+    char quote[8];
+    char interval[8];
+    int  numCandles;
+    bool autoCandles;
+    int  emaFast;
+    int  emaSlow;
+    int  rsiPeriod;
+    bool heikinAshi;
+};
+
+struct ChartSlot {
+    SlotConfig cfg;
+    Candle candles[MAX_CANDLES];
+    float  emaFastArr[MAX_CANDLES];
+    float  emaSlowArr[MAX_CANDLES];
+    float  rsiVal[MAX_CANDLES];
+    int    candleCount;
+    float  lastPrice;
+    float  lastPctChange;
+};
+
 // ─── RUNTIME CONFIG (loaded from NVS) ──────────────────
 Preferences prefs;
 
 char     cfgSSID[64]      = "YOUR_SSID";
 char     cfgPass[64]      = "YOUR_PASSWORD";
+int      cfgLayout        = 1;        // 1, 2, 3, or 4
+int      cfgRefreshMin    = 5;
+int      cfgTzOffset      = 0;        // seconds from UTC
+int      cfgFullRefEvery  = 10;
+int      cfgPartialPct    = 40;       // 0-100
+char     cfgUiUser[24]    = "";
+char     cfgUiPass[32]    = "";
+const char* NTP_SERVER    = "pool.ntp.org";
+const char* MDNS_HOST     = "epdchart";
+
+// Per-slot chart config globals (used as scratch by fetch functions)
 char     cfgExchange[16]  = "hyperliquid";
 char     cfgCoin[16]      = "ETH";
 char     cfgQuote[8]      = "USDT";
 char     cfgInterval[8]   = "5m";
 int      cfgNumCandles    = 60;
 bool     cfgAutoCandles   = true;
-int      cfgRefreshMin    = 5;
 int      cfgEmaFast       = 9;
 int      cfgEmaSlow       = 21;
 int      cfgRsiPeriod     = 14;
-int      cfgTzOffset      = 0;        // seconds from UTC
-int      cfgFullRefEvery  = 10;
-int      cfgPartialPct    = 40;       // 0-100
 bool     cfgHeikinAshi    = false;
-char     cfgUiUser[24]    = "";
-char     cfgUiPass[32]    = "";
-const char* NTP_SERVER    = "pool.ntp.org";
-const char* MDNS_HOST     = "epdchart";
 
 // ─── STATE ─────────────────────────────────────────────
 unsigned long lastRefreshMs    = 0;
@@ -104,13 +139,15 @@ const int MAX_CONSECUTIVE_FAILS = 3;          // force WiFi reset after this man
 static unsigned char framebuf[BUF_SIZE];
 static unsigned char oldbuf[BUF_SIZE];
 
-// ─── CANDLE DATA ────────────────────────────────────────
-struct Candle { float o, h, l, c, v; uint64_t t; };
+// ─── CANDLE DATA (scratch arrays used by fetch functions) ──
 static Candle candles[MAX_CANDLES];
 static int    candleCount = 0;
 static float  emaFast[MAX_CANDLES];
 static float  emaSlow[MAX_CANDLES];
 static float  rsiVal[MAX_CANDLES];
+
+// ─── CHART SLOTS ────────────────────────────────────────
+static ChartSlot slots[MAX_SLOTS];
 
 // ─── OBJECTS ────────────────────────────────────────────
 Epd       epd;
@@ -494,59 +531,189 @@ bool authenticateRequest() {
     return false;
 }
 
+void initSlotDefaults(SlotConfig& cfg) {
+    copyBounded(cfg.exchange, sizeof(cfg.exchange), "hyperliquid");
+    copyBounded(cfg.coin, sizeof(cfg.coin), "ETH");
+    copyBounded(cfg.quote, sizeof(cfg.quote), "USDT");
+    copyBounded(cfg.interval, sizeof(cfg.interval), "5m");
+    cfg.numCandles = 60;
+    cfg.autoCandles = true;
+    cfg.emaFast = 9;
+    cfg.emaSlow = 21;
+    cfg.rsiPeriod = 14;
+    cfg.heikinAshi = false;
+}
+
+void loadSlotConfig(int i) {
+    char key[16];
+    String s;
+    snprintf(key, sizeof(key), "s%dexchange", i);
+    s = prefs.getString(key, slots[i].cfg.exchange);
+    copyBounded(slots[i].cfg.exchange, sizeof(slots[i].cfg.exchange), s.c_str());
+
+    snprintf(key, sizeof(key), "s%dcoin", i);
+    s = prefs.getString(key, slots[i].cfg.coin);
+    copyBounded(slots[i].cfg.coin, sizeof(slots[i].cfg.coin), s.c_str());
+
+    snprintf(key, sizeof(key), "s%dquote", i);
+    s = prefs.getString(key, slots[i].cfg.quote);
+    copyBounded(slots[i].cfg.quote, sizeof(slots[i].cfg.quote), s.c_str());
+
+    snprintf(key, sizeof(key), "s%dinterval", i);
+    s = prefs.getString(key, slots[i].cfg.interval);
+    copyBounded(slots[i].cfg.interval, sizeof(slots[i].cfg.interval), s.c_str());
+
+    toUpperInPlace(slots[i].cfg.coin);
+    toUpperInPlace(slots[i].cfg.quote);
+    if (!isValidExchange(slots[i].cfg.exchange))
+        copyBounded(slots[i].cfg.exchange, sizeof(slots[i].cfg.exchange), "hyperliquid");
+    if (!isValidInterval(slots[i].cfg.interval))
+        copyBounded(slots[i].cfg.interval, sizeof(slots[i].cfg.interval), "5m");
+    if (!isValidSymbolToken(slots[i].cfg.coin, sizeof(slots[i].cfg.coin)))
+        copyBounded(slots[i].cfg.coin, sizeof(slots[i].cfg.coin), "ETH");
+    if (!isValidSymbolToken(slots[i].cfg.quote, sizeof(slots[i].cfg.quote)))
+        copyBounded(slots[i].cfg.quote, sizeof(slots[i].cfg.quote), "USDT");
+
+    snprintf(key, sizeof(key), "s%dnumCandl", i);
+    slots[i].cfg.numCandles = prefs.getInt(key, slots[i].cfg.numCandles);
+    snprintf(key, sizeof(key), "s%dautoCandl", i);
+    slots[i].cfg.autoCandles = prefs.getBool(key, slots[i].cfg.autoCandles);
+    snprintf(key, sizeof(key), "s%demaFast", i);
+    slots[i].cfg.emaFast = prefs.getInt(key, slots[i].cfg.emaFast);
+    snprintf(key, sizeof(key), "s%demaSlow", i);
+    slots[i].cfg.emaSlow = prefs.getInt(key, slots[i].cfg.emaSlow);
+    snprintf(key, sizeof(key), "s%drsiPeriod", i);
+    slots[i].cfg.rsiPeriod = prefs.getInt(key, slots[i].cfg.rsiPeriod);
+    snprintf(key, sizeof(key), "s%dheikinAsh", i);
+    slots[i].cfg.heikinAshi = prefs.getBool(key, slots[i].cfg.heikinAshi);
+}
+
+void saveSlotConfig(int i) {
+    char key[16];
+    snprintf(key, sizeof(key), "s%dexchange", i);
+    prefs.putString(key, slots[i].cfg.exchange);
+    snprintf(key, sizeof(key), "s%dcoin", i);
+    prefs.putString(key, slots[i].cfg.coin);
+    snprintf(key, sizeof(key), "s%dquote", i);
+    prefs.putString(key, slots[i].cfg.quote);
+    snprintf(key, sizeof(key), "s%dinterval", i);
+    prefs.putString(key, slots[i].cfg.interval);
+    snprintf(key, sizeof(key), "s%dnumCandl", i);
+    prefs.putInt(key, slots[i].cfg.numCandles);
+    snprintf(key, sizeof(key), "s%dautoCandl", i);
+    prefs.putBool(key, slots[i].cfg.autoCandles);
+    snprintf(key, sizeof(key), "s%demaFast", i);
+    prefs.putInt(key, slots[i].cfg.emaFast);
+    snprintf(key, sizeof(key), "s%demaSlow", i);
+    prefs.putInt(key, slots[i].cfg.emaSlow);
+    snprintf(key, sizeof(key), "s%drsiPeriod", i);
+    prefs.putInt(key, slots[i].cfg.rsiPeriod);
+    snprintf(key, sizeof(key), "s%dheikinAsh", i);
+    prefs.putBool(key, slots[i].cfg.heikinAshi);
+}
+
 void loadConfig() {
     prefs.begin("epdchart", true);  // read-only
     String s;
     s = prefs.getString("ssid", cfgSSID);        copyBounded(cfgSSID, sizeof(cfgSSID), s.c_str());
     s = prefs.getString("pass", cfgPass);        copyBounded(cfgPass, sizeof(cfgPass), s.c_str());
-    s = prefs.getString("exchange", cfgExchange);copyBounded(cfgExchange, sizeof(cfgExchange), s.c_str());
-    s = prefs.getString("coin", cfgCoin);        copyBounded(cfgCoin, sizeof(cfgCoin), s.c_str());
-    s = prefs.getString("quote", cfgQuote);      copyBounded(cfgQuote, sizeof(cfgQuote), s.c_str());
-    s = prefs.getString("interval", cfgInterval);copyBounded(cfgInterval, sizeof(cfgInterval), s.c_str());
     s = prefs.getString("uiUser", cfgUiUser);    copyBounded(cfgUiUser, sizeof(cfgUiUser), s.c_str());
     s = prefs.getString("uiPass", cfgUiPass);    copyBounded(cfgUiPass, sizeof(cfgUiPass), s.c_str());
 
-    toUpperInPlace(cfgCoin);
-    toUpperInPlace(cfgQuote);
-    if (!isValidExchange(cfgExchange)) copyBounded(cfgExchange, sizeof(cfgExchange), "hyperliquid");
-    if (!isValidInterval(cfgInterval)) copyBounded(cfgInterval, sizeof(cfgInterval), "5m");
-    if (!isValidSymbolToken(cfgCoin, sizeof(cfgCoin))) copyBounded(cfgCoin, sizeof(cfgCoin), "ETH");
-    if (!isValidSymbolToken(cfgQuote, sizeof(cfgQuote))) copyBounded(cfgQuote, sizeof(cfgQuote), "USDT");
-
-    cfgNumCandles   = prefs.getInt("numCandles", cfgNumCandles);
-    cfgAutoCandles  = prefs.getBool("autoCandl", cfgAutoCandles);
     cfgRefreshMin   = prefs.getInt("refreshMin", cfgRefreshMin);
-    cfgEmaFast      = prefs.getInt("emaFast", cfgEmaFast);
-    cfgEmaSlow      = prefs.getInt("emaSlow", cfgEmaSlow);
-    cfgRsiPeriod    = prefs.getInt("rsiPeriod", cfgRsiPeriod);
     cfgTzOffset     = prefs.getInt("tzOffset", cfgTzOffset);
     cfgFullRefEvery = prefs.getInt("fullRefEv", cfgFullRefEvery);
     cfgPartialPct   = prefs.getInt("partialPct", cfgPartialPct);
-    cfgHeikinAshi   = prefs.getBool("heikinAshi", cfgHeikinAshi);
+    cfgLayout       = prefs.getInt("layout", 1);
+    if (cfgLayout < 1 || cfgLayout > 4) cfgLayout = 1;
+
+    // Initialize all slots with defaults
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        initSlotDefaults(slots[i].cfg);
+        slots[i].candleCount = 0;
+        slots[i].lastPrice = 0;
+        slots[i].lastPctChange = 0;
+    }
+
+    // Check for migration from old single-chart format
+    bool hasNewFormat = prefs.isKey("s0exchange");
+    bool hasOldFormat = prefs.isKey("exchange");
+
+    if (hasNewFormat) {
+        // New multi-slot format
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            loadSlotConfig(i);
+        }
+    } else if (hasOldFormat) {
+        // Migrate from old single-chart format into slot 0
+        s = prefs.getString("exchange", "hyperliquid");
+        copyBounded(slots[0].cfg.exchange, sizeof(slots[0].cfg.exchange), s.c_str());
+        s = prefs.getString("coin", "ETH");
+        copyBounded(slots[0].cfg.coin, sizeof(slots[0].cfg.coin), s.c_str());
+        s = prefs.getString("quote", "USDT");
+        copyBounded(slots[0].cfg.quote, sizeof(slots[0].cfg.quote), s.c_str());
+        s = prefs.getString("interval", "5m");
+        copyBounded(slots[0].cfg.interval, sizeof(slots[0].cfg.interval), s.c_str());
+
+        toUpperInPlace(slots[0].cfg.coin);
+        toUpperInPlace(slots[0].cfg.quote);
+        if (!isValidExchange(slots[0].cfg.exchange))
+            copyBounded(slots[0].cfg.exchange, sizeof(slots[0].cfg.exchange), "hyperliquid");
+        if (!isValidInterval(slots[0].cfg.interval))
+            copyBounded(slots[0].cfg.interval, sizeof(slots[0].cfg.interval), "5m");
+
+        slots[0].cfg.numCandles  = prefs.getInt("numCandles", 60);
+        slots[0].cfg.autoCandles = prefs.getBool("autoCandl", true);
+        slots[0].cfg.emaFast     = prefs.getInt("emaFast", 9);
+        slots[0].cfg.emaSlow     = prefs.getInt("emaSlow", 21);
+        slots[0].cfg.rsiPeriod   = prefs.getInt("rsiPeriod", 14);
+        slots[0].cfg.heikinAshi  = prefs.getBool("heikinAshi", false);
+
+        // Copy slot 0 config to slots 1-3
+        for (int i = 1; i < MAX_SLOTS; i++) {
+            memcpy(&slots[i].cfg, &slots[0].cfg, sizeof(SlotConfig));
+        }
+        cfgLayout = 1;
+        Serial.println("Migrated old single-chart config to slot 0");
+    }
+
+    // Copy slot 0 config into scratch globals (for backward compat with fetch functions)
+    copyBounded(cfgExchange, sizeof(cfgExchange), slots[0].cfg.exchange);
+    copyBounded(cfgCoin, sizeof(cfgCoin), slots[0].cfg.coin);
+    copyBounded(cfgQuote, sizeof(cfgQuote), slots[0].cfg.quote);
+    copyBounded(cfgInterval, sizeof(cfgInterval), slots[0].cfg.interval);
+    cfgNumCandles  = slots[0].cfg.numCandles;
+    cfgAutoCandles = slots[0].cfg.autoCandles;
+    cfgEmaFast     = slots[0].cfg.emaFast;
+    cfgEmaSlow     = slots[0].cfg.emaSlow;
+    cfgRsiPeriod   = slots[0].cfg.rsiPeriod;
+    cfgHeikinAshi  = slots[0].cfg.heikinAshi;
+
     prefs.end();
-    Serial.printf("Config loaded from NVS (auth:%s)\n", authEnabled() ? "on" : "off");
+    Serial.printf("Config loaded from NVS (auth:%s, layout:%d)\n", authEnabled() ? "on" : "off", cfgLayout);
+
+    // Save new format if migrated from old
+    if (hasOldFormat && !hasNewFormat) {
+        saveConfig();
+    }
 }
 
 void saveConfig() {
     prefs.begin("epdchart", false);  // read-write
     prefs.putString("ssid", cfgSSID);
     prefs.putString("pass", cfgPass);
-    prefs.putString("exchange", cfgExchange);
-    prefs.putString("coin", cfgCoin);
-    prefs.putString("quote", cfgQuote);
-    prefs.putString("interval", cfgInterval);
     prefs.putString("uiUser", cfgUiUser);
     prefs.putString("uiPass", cfgUiPass);
-    prefs.putInt("numCandles", cfgNumCandles);
-    prefs.putBool("autoCandl", cfgAutoCandles);
     prefs.putInt("refreshMin", cfgRefreshMin);
-    prefs.putInt("emaFast", cfgEmaFast);
-    prefs.putInt("emaSlow", cfgEmaSlow);
-    prefs.putInt("rsiPeriod", cfgRsiPeriod);
     prefs.putInt("tzOffset", cfgTzOffset);
     prefs.putInt("fullRefEv", cfgFullRefEvery);
     prefs.putInt("partialPct", cfgPartialPct);
-    prefs.putBool("heikinAshi", cfgHeikinAshi);
+    prefs.putInt("layout", cfgLayout);
+
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        saveSlotConfig(i);
+    }
+
     prefs.end();
     Serial.println("Config saved to NVS");
 }
@@ -703,10 +870,38 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   .coin-dd .coin-empty{padding:10px 12px;font-size:0.78em;color:var(--text-dim);font-style:italic}
   .coin-loading{padding:10px 12px;font-size:0.78em;color:var(--accent);font-family:'JetBrains Mono',monospace}
 
+  .layout-picker{display:flex;gap:8px}
+  .layout-opt{flex:1;cursor:pointer}
+  .layout-opt input[type=radio]{display:none}
+  .layout-thumb{
+    display:flex;flex-direction:column;align-items:center;gap:6px;
+    padding:10px 8px;border:1px solid var(--border);border-radius:8px;
+    background:var(--bg);transition:all .2s;
+  }
+  .layout-opt input:checked + .layout-thumb{
+    border-color:var(--accent);background:var(--accent-dim);
+  }
+  .layout-thumb span{
+    font-family:'JetBrains Mono',monospace;font-size:0.75em;color:var(--text-dim);
+  }
+  .layout-opt input:checked + .layout-thumb span{color:var(--accent)}
+  .lt-grid{display:grid;gap:2px;width:48px;height:30px}
+  .lt-1{grid-template:1fr/1fr}
+  .lt-2{grid-template:1fr 1fr/1fr}
+  .lt-4{grid-template:1fr 1fr/1fr 1fr}
+  .lt-cell{background:var(--border);border-radius:2px}
+  .lt-empty{background:transparent;border:1px dashed var(--border)}
+  .layout-opt input:checked + .layout-thumb .lt-cell:not(.lt-empty){background:var(--accent)}
+
+  .slot-card{transition:opacity .3s}
+  .slot-card.dimmed{opacity:0.45}
+  .slot-card.dimmed .card{border-style:dashed}
+
   @media(max-width:480px){
     .row{flex-direction:column;gap:0}
     .header{padding:14px 16px}
     .header h1{font-size:1em}
+    .layout-picker{flex-wrap:wrap}
   }
 </style>
 </head>
@@ -736,54 +931,20 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     </div>
   </div>
 
-  <!-- CHART CONFIG -->
+  <!-- LAYOUT SELECTOR -->
   <div class="card">
-    <div class="card-head"><span class="icon">&#9670;</span><h2>Chart</h2></div>
+    <div class="card-head"><span class="icon">&#9638;</span><h2>Layout</h2></div>
     <div class="card-body">
-      <div class="field">
-        <label>Exchange</label>
-        <select id="exchange">
-          <option value="hyperliquid">Hyperliquid</option>
-          <option value="binance">Binance</option>
-          <option value="asterdex">AsterDEX</option>
-          <option value="kraken">Kraken</option>
-          <option value="poloniex">Poloniex</option>
-        </select>
+      <div class="layout-picker">
+        <label class="layout-opt"><input type="radio" name="layout" value="1" checked onchange="onLayoutChange()">
+          <div class="layout-thumb"><div class="lt-grid lt-1"><div class="lt-cell"></div></div><span>1</span></div></label>
+        <label class="layout-opt"><input type="radio" name="layout" value="2" onchange="onLayoutChange()">
+          <div class="layout-thumb"><div class="lt-grid lt-2"><div class="lt-cell"></div><div class="lt-cell"></div></div><span>2</span></div></label>
+        <label class="layout-opt"><input type="radio" name="layout" value="3" onchange="onLayoutChange()">
+          <div class="layout-thumb"><div class="lt-grid lt-4"><div class="lt-cell"></div><div class="lt-cell"></div><div class="lt-cell"></div><div class="lt-cell lt-empty"></div></div><span>3</span></div></label>
+        <label class="layout-opt"><input type="radio" name="layout" value="4" onchange="onLayoutChange()">
+          <div class="layout-thumb"><div class="lt-grid lt-4"><div class="lt-cell"></div><div class="lt-cell"></div><div class="lt-cell"></div><div class="lt-cell"></div></div><span>4</span></div></label>
       </div>
-      <div class="row">
-        <div class="field">
-          <label>Coin</label>
-          <div class="coin-wrap">
-            <input type="text" id="coinSearch" placeholder="Search coins..." autocomplete="off">
-            <input type="hidden" id="coin" value="ETH">
-            <div class="coin-dd" id="coinDropdown"></div>
-          </div>
-        </div>
-        <div class="field">
-          <label>Quote</label>
-          <select id="quote"></select>
-        </div>
-        <div class="field">
-          <label>Interval</label>
-          <select id="interval"></select>
-        </div>
-      </div>
-
-      <div class="toggle-row">
-        <span class="label">Auto candle count</span>
-        <label class="toggle"><input type="checkbox" id="autoCandles" checked><span class="slider"></span></label>
-      </div>
-      <div id="autoInfo" class="auto-info"></div>
-
-      <div class="toggle-row" style="margin-top:8px">
-        <span class="label">Heikin Ashi candles</span>
-        <label class="toggle"><input type="checkbox" id="heikinAshi"><span class="slider"></span></label>
-      </div>
-      <div class="field" id="manualCandleField" style="margin-top:10px;display:none">
-        <label>Number of candles</label>
-        <input type="number" id="numCandles" min="5" max="200" value="60">
-      </div>
-
       <div class="field" style="margin-top:14px">
         <label>Refresh every (minutes)</label>
         <input type="number" id="refreshMin" min="1" max="60" value="5">
@@ -791,26 +952,8 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     </div>
   </div>
 
-  <!-- INDICATORS -->
-  <div class="card">
-    <div class="card-head"><span class="icon">&#9651;</span><h2>Indicators</h2></div>
-    <div class="card-body">
-      <div class="row">
-        <div class="field">
-          <label>EMA fast</label>
-          <input type="number" id="emaFast" min="2" max="100" value="9">
-        </div>
-        <div class="field">
-          <label>EMA slow</label>
-          <input type="number" id="emaSlow" min="2" max="200" value="21">
-        </div>
-        <div class="field">
-          <label>RSI period</label>
-          <input type="number" id="rsiPeriod" min="2" max="100" value="14">
-        </div>
-      </div>
-    </div>
-  </div>
+  <!-- CHART SLOTS (all 4 always visible) -->
+  <div id="slotContainer"></div>
 
   <!-- DISPLAY -->
   <div class="card">
@@ -932,11 +1075,17 @@ const EX_INTERVALS = {
   kraken:['1m','5m','15m','30m','1h','4h','1d','1w'],
   poloniex:['1m','5m','15m','30m','1h','2h','4h','6h','12h','1d','3d','1w','1M']
 };
+const QUOTE_DEFAULTS = {
+  hyperliquid:['USDC'],binance:['USDT','BUSD','USDC'],asterdex:['USDT'],
+  kraken:['USD','USDT','EUR'],poloniex:['USDT','USDC']
+};
+const MAX_SLOTS = 4;
 
-let coinList = [];
 let coinCache = {};
-let hlIdx = -1;
+let slotCoinList = [[],[],[],[]];
+let slotHlIdx = [-1,-1,-1,-1];
 let authHeader = '';
+let currentLayout = 1;
 
 function setAuthHeader() {
   const u = (document.getElementById('uiUser').value || '').trim();
@@ -951,190 +1100,200 @@ function authFetch(url, opts) {
   return fetch(url, opts);
 }
 
-function rebuildQuoteOptions(ex, currentQuote) {
-  const defaults = {
-    hyperliquid:['USDC'],
-    binance:['USDT','BUSD','USDC'],
-    asterdex:['USDT'],
-    kraken:['USD','USDT','EUR'],
-    poloniex:['USDT','USDC']
-  };
-  const sel = document.getElementById('quote');
-  const qs = defaults[ex] || ['USDT'];
-  sel.innerHTML = '';
-  qs.forEach(function(v){
-    const o = document.createElement('option');
-    o.value = v; o.textContent = v; sel.appendChild(o);
+function el(id) { return document.getElementById(id); }
+
+// ── Generate slot card HTML ──
+function buildSlotCards() {
+  let html = '';
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    html += '<div class="slot-card" id="slotCard_'+i+'">' +
+      '<div class="card"><div class="card-head"><span class="icon">&#9670;</span><h2>Chart '+(i+1)+'</h2></div>' +
+      '<div class="card-body">' +
+      '<div class="field"><label>Exchange</label>' +
+      '<select id="exchange_'+i+'">' +
+      '<option value="hyperliquid">Hyperliquid</option>' +
+      '<option value="binance">Binance</option>' +
+      '<option value="asterdex">AsterDEX</option>' +
+      '<option value="kraken">Kraken</option>' +
+      '<option value="poloniex">Poloniex</option></select></div>' +
+      '<div class="row">' +
+      '<div class="field"><label>Coin</label><div class="coin-wrap">' +
+      '<input type="text" id="coinSearch_'+i+'" placeholder="Search coins..." autocomplete="off">' +
+      '<input type="hidden" id="coin_'+i+'">' +
+      '<div class="coin-dd" id="coinDd_'+i+'"></div></div></div>' +
+      '<div class="field"><label>Quote</label><select id="quote_'+i+'"></select></div>' +
+      '<div class="field"><label>Interval</label><select id="interval_'+i+'"></select></div></div>' +
+      '<div class="toggle-row"><span class="label">Auto candle count</span>' +
+      '<label class="toggle"><input type="checkbox" id="autoCandles_'+i+'" checked><span class="slider"></span></label></div>' +
+      '<div id="autoInfo_'+i+'" class="auto-info"></div>' +
+      '<div class="toggle-row" style="margin-top:8px"><span class="label">Heikin Ashi</span>' +
+      '<label class="toggle"><input type="checkbox" id="heikinAshi_'+i+'"><span class="slider"></span></label></div>' +
+      '<div class="field" id="manualCandleField_'+i+'" style="margin-top:10px;display:none">' +
+      '<label>Candles</label><input type="number" id="numCandles_'+i+'" min="5" max="200" value="60"></div>' +
+      '<div class="row" style="margin-top:10px">' +
+      '<div class="field"><label>EMA fast</label><input type="number" id="emaFast_'+i+'" min="2" max="100" value="9"></div>' +
+      '<div class="field"><label>EMA slow</label><input type="number" id="emaSlow_'+i+'" min="2" max="200" value="21"></div>' +
+      '<div class="field"><label>RSI</label><input type="number" id="rsiPeriod_'+i+'" min="2" max="100" value="14"></div></div>' +
+      '</div></div></div>';
+  }
+  el('slotContainer').innerHTML = html;
+
+  // Wire up events for each slot
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    (function(idx) {
+      el('exchange_'+idx).addEventListener('change', async function() {
+        const ex = this.value;
+        rebuildIntervals(idx, ex, el('interval_'+idx).value);
+        rebuildQuoteOptions(idx, ex, el('quote_'+idx).value);
+        await fetchPairsForSlot(idx, ex);
+        el('coin_'+idx).value = '';
+        el('coinSearch_'+idx).value = '';
+        renderSlotCoinDd(idx, '');
+      });
+      el('quote_'+idx).addEventListener('change', async function() {
+        await fetchPairsForSlot(idx, el('exchange_'+idx).value);
+        el('coin_'+idx).value = '';
+        el('coinSearch_'+idx).value = '';
+        renderSlotCoinDd(idx, '');
+      });
+      el('interval_'+idx).addEventListener('change', function(){ updateSlotAutoInfo(idx); });
+      el('autoCandles_'+idx).addEventListener('change', function(){ updateSlotAutoInfo(idx); });
+      el('numCandles_'+idx).addEventListener('input', function(){ updateSlotAutoInfo(idx); });
+
+      var csEl = el('coinSearch_'+idx);
+      var ddEl = el('coinDd_'+idx);
+      csEl.addEventListener('focus', function(){ renderSlotCoinDd(idx, csEl.value); });
+      csEl.addEventListener('input', function(){ renderSlotCoinDd(idx, csEl.value); });
+      csEl.addEventListener('keydown', function(e) {
+        var items = ddEl.querySelectorAll('.coin-item');
+        if (e.key==='ArrowDown') { e.preventDefault(); slotHlIdx[idx]=Math.min(slotHlIdx[idx]+1,items.length-1); items.forEach(function(el,j){el.classList.toggle('hl',j===slotHlIdx[idx]);}); }
+        else if (e.key==='ArrowUp') { e.preventDefault(); slotHlIdx[idx]=Math.max(slotHlIdx[idx]-1,0); items.forEach(function(el,j){el.classList.toggle('hl',j===slotHlIdx[idx]);}); }
+        else if (e.key==='Enter') { e.preventDefault(); if (slotHlIdx[idx]>=0&&slotHlIdx[idx]<items.length) selectSlotCoin(idx,items[slotHlIdx[idx]].dataset.coin); else if(csEl.value.trim()) selectSlotCoin(idx,csEl.value.trim().toUpperCase()); }
+        else if (e.key==='Escape') ddEl.classList.remove('open');
+      });
+      ddEl.addEventListener('click', function(e) {
+        var item = e.target.closest('.coin-item');
+        if (item) selectSlotCoin(idx, item.dataset.coin);
+      });
+    })(i);
+  }
+
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('.coin-wrap')) {
+      for (var j=0;j<MAX_SLOTS;j++) el('coinDd_'+j).classList.remove('open');
+    }
   });
+}
+
+function rebuildQuoteOptions(idx, ex, currentQuote) {
+  var sel = el('quote_'+idx);
+  var qs = QUOTE_DEFAULTS[ex] || ['USDT'];
+  sel.innerHTML = '';
+  qs.forEach(function(v){ var o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); });
   sel.value = qs.indexOf(currentQuote) >= 0 ? currentQuote : qs[0];
 }
 
+function rebuildIntervals(idx, ex, currentIv) {
+  var sel = el('interval_'+idx);
+  var ivs = EX_INTERVALS[ex] || EX_INTERVALS.hyperliquid;
+  sel.innerHTML = '';
+  ivs.forEach(function(v){ var o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); });
+  if (ivs.indexOf(currentIv)>=0) sel.value=currentIv; else sel.value='1h';
+  updateSlotAutoInfo(idx);
+}
+
 function fmtSpan(iv, n) {
-  const totalMin = (IV_MINS[iv]||5) * n;
+  var totalMin = (IV_MINS[iv]||5) * n;
   if (totalMin < 60) return totalMin + 'm';
   if (totalMin < 1440) return (totalMin/60).toFixed(1).replace(/\.0$/,'') + 'h';
   return (totalMin/1440).toFixed(1).replace(/\.0$/,'') + 'd';
 }
 
-function updateAutoInfo() {
-  const iv = document.getElementById('interval').value;
+function updateSlotAutoInfo(idx) {
+  var ivEl = el('interval_'+idx);
+  if (!ivEl) return;
+  var iv = ivEl.value;
   if (!iv) return;
-  const isAuto = document.getElementById('autoCandles').checked;
-  const n = isAuto ? (AUTO_MAP[iv]||60) : parseInt(document.getElementById('numCandles').value)||60;
-  const span = fmtSpan(iv, n);
-  document.getElementById('autoInfo').innerHTML =
-    '&#x25B6; ' + n + ' candles &times; ' + iv + ' = <strong>' + span + '</strong> window';
-  document.getElementById('manualCandleField').style.display = isAuto ? 'none' : 'block';
-  if (isAuto) document.getElementById('numCandles').value = n;
+  var isAuto = el('autoCandles_'+idx).checked;
+  var n = isAuto ? (AUTO_MAP[iv]||60) : parseInt(el('numCandles_'+idx).value)||60;
+  var span = fmtSpan(iv, n);
+  el('autoInfo_'+idx).innerHTML = '&#x25B6; '+n+' candles &times; '+iv+' = <strong>'+span+'</strong>';
+  el('manualCandleField_'+idx).style.display = isAuto ? 'none' : 'block';
+  if (isAuto) el('numCandles_'+idx).value = n;
 }
 
-function rebuildIntervals(ex, currentIv) {
-  const sel = document.getElementById('interval');
-  const ivs = EX_INTERVALS[ex] || EX_INTERVALS.hyperliquid;
-  sel.innerHTML = '';
-  ivs.forEach(function(v) {
-    const o = document.createElement('option');
-    o.value = v; o.textContent = v;
-    sel.appendChild(o);
-  });
-  if (ivs.indexOf(currentIv) >= 0) sel.value = currentIv;
-  else sel.value = '1h';
-  updateAutoInfo();
-}
-
-async function fetchPairs(ex) {
-  const quote = (document.getElementById('quote').value || 'USDT').toUpperCase();
-  const cacheKey = ex + ':' + quote;
-  if (coinCache[cacheKey]) { coinList = coinCache[cacheKey]; return; }
-  const dd = document.getElementById('coinDropdown');
+async function fetchPairsForSlot(idx, ex) {
+  var quote = (el('quote_'+idx).value || 'USDT').toUpperCase();
+  var cacheKey = ex + ':' + quote;
+  if (coinCache[cacheKey]) { slotCoinList[idx] = coinCache[cacheKey]; return; }
+  var dd = el('coinDd_'+idx);
   dd.innerHTML = '<div class="coin-loading">Loading pairs...</div>';
   dd.classList.add('open');
   try {
-    let list = [];
+    var list = [];
     if (ex === 'hyperliquid') {
-      const r = await fetch('https://api.hyperliquid.xyz/info', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:'{"type":"meta"}'
-      });
-      const d = await r.json();
-      list = (d.universe||[])
-        .filter(function(x){ return (x.quoteToken || 'USDC') === quote; })
-        .map(function(x){return x.name;});
+      var r = await fetch('https://api.hyperliquid.xyz/info', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{"type":"meta"}'});
+      var d = await r.json();
+      list = (d.universe||[]).filter(function(x){return (x.quoteToken||'USDC')===quote;}).map(function(x){return x.name;});
     } else if (ex === 'binance') {
-      const r = await fetch('https://api.binance.com/api/v3/exchangeInfo');
-      const d = await r.json();
-      list = (d.symbols||[]).filter(function(s){return s.quoteAsset===quote&&s.status==='TRADING';})
-        .map(function(s){return s.baseAsset;});
+      var r = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+      var d = await r.json();
+      list = (d.symbols||[]).filter(function(s){return s.quoteAsset===quote&&s.status==='TRADING';}).map(function(s){return s.baseAsset;});
     } else if (ex === 'asterdex') {
-      const r = await fetch('https://fapi.asterdex.com/fapi/v3/exchangeInfo');
-      const d = await r.json();
-      list = (d.symbols||[]).filter(function(s){return s.quoteAsset===quote&&s.status==='TRADING';})
-        .map(function(s){return s.baseAsset;});
+      var r = await fetch('https://fapi.asterdex.com/fapi/v3/exchangeInfo');
+      var d = await r.json();
+      list = (d.symbols||[]).filter(function(s){return s.quoteAsset===quote&&s.status==='TRADING';}).map(function(s){return s.baseAsset;});
     } else if (ex === 'kraken') {
-      const r = await fetch('https://api.kraken.com/0/public/AssetPairs');
-      const d = await r.json();
-      const pairs = d.result||{};
-      const seen = {};
-      Object.keys(pairs).forEach(function(k){
-        const p = pairs[k];
-        const q = (p.quote||'').replace(/^Z/,'');
-        if (q===quote) {
-          const b = (p.base||'').replace(/^X/,'');
-          if (!seen[b]) { seen[b]=1; list.push(b); }
-        }
-      });
+      var r = await fetch('https://api.kraken.com/0/public/AssetPairs');
+      var d = await r.json();
+      var pairs=d.result||{},seen={};
+      Object.keys(pairs).forEach(function(k){ var p=pairs[k]; var q=(p.quote||'').replace(/^Z/,''); if(q===quote){var b=(p.base||'').replace(/^X/,'');if(!seen[b]){seen[b]=1;list.push(b);}}});
     } else if (ex === 'poloniex') {
-      const r = await fetch('https://api.poloniex.com/markets');
-      const d = await r.json();
-      list = d.filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);})
-        .map(function(m){return m.symbol.split('_')[0];});
+      var r = await fetch('https://api.poloniex.com/markets');
+      var d = await r.json();
+      list = d.filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);}).map(function(m){return m.symbol.split('_')[0];});
     }
     list.sort();
     list = list.filter(function(v,i,a){return i===0||v!==a[i-1];});
     coinCache[cacheKey] = list;
-    coinList = list;
-  } catch(e) {
-    console.error('Failed to fetch pairs:', e);
-    coinList = [];
-  }
+    slotCoinList[idx] = list;
+  } catch(e) { console.error('fetchPairs slot '+idx+':', e); slotCoinList[idx] = []; }
   dd.classList.remove('open');
 }
 
-function renderCoinDropdown(filter) {
-  const dd = document.getElementById('coinDropdown');
-  const q = (filter||'').toUpperCase();
-  const matches = q ? coinList.filter(function(c){return c.toUpperCase().indexOf(q)>=0;}) : coinList;
-  const show = matches.slice(0, 50);
-  hlIdx = -1;
-  if (show.length === 0) {
-    dd.innerHTML = '<div class="coin-empty">' + (coinList.length ? 'No matches' : 'No pairs loaded') + '</div>';
-  } else {
-    dd.innerHTML = show.map(function(c){
-      return '<div class="coin-item" data-coin="'+c+'">'+c+'</div>';
-    }).join('');
-  }
+function renderSlotCoinDd(idx, filter) {
+  var dd = el('coinDd_'+idx);
+  var q = (filter||'').toUpperCase();
+  var cl = slotCoinList[idx] || [];
+  var matches = q ? cl.filter(function(c){return c.toUpperCase().indexOf(q)>=0;}) : cl;
+  var show = matches.slice(0, 50);
+  slotHlIdx[idx] = -1;
+  if (!show.length) dd.innerHTML = '<div class="coin-empty">'+(cl.length?'No matches':'No pairs loaded')+'</div>';
+  else dd.innerHTML = show.map(function(c){return '<div class="coin-item" data-coin="'+c+'">'+c+'</div>';}).join('');
   dd.classList.add('open');
 }
 
-function selectCoin(name) {
-  document.getElementById('coin').value = name;
-  document.getElementById('coinSearch').value = name;
-  document.getElementById('coinDropdown').classList.remove('open');
+function selectSlotCoin(idx, name) {
+  el('coin_'+idx).value = name;
+  el('coinSearch_'+idx).value = name;
+  el('coinDd_'+idx).classList.remove('open');
 }
 
-const coinSearchEl = document.getElementById('coinSearch');
-const coinDdEl = document.getElementById('coinDropdown');
+function onLayoutChange() {
+  var radios = document.querySelectorAll('input[name="layout"]');
+  for (var i=0;i<radios.length;i++) { if (radios[i].checked) currentLayout = parseInt(radios[i].value); }
+  updateSlotDimming();
+}
 
-coinSearchEl.addEventListener('focus', function() { renderCoinDropdown(coinSearchEl.value); });
-coinSearchEl.addEventListener('input', function() { renderCoinDropdown(coinSearchEl.value); });
-coinSearchEl.addEventListener('keydown', function(e) {
-  const items = coinDdEl.querySelectorAll('.coin-item');
-  if (e.key === 'ArrowDown') {
-    e.preventDefault(); hlIdx = Math.min(hlIdx+1, items.length-1);
-    items.forEach(function(el,i){el.classList.toggle('hl',i===hlIdx);});
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault(); hlIdx = Math.max(hlIdx-1, 0);
-    items.forEach(function(el,i){el.classList.toggle('hl',i===hlIdx);});
-  } else if (e.key === 'Enter') {
-    e.preventDefault();
-    if (hlIdx >= 0 && hlIdx < items.length) selectCoin(items[hlIdx].dataset.coin);
-    else if (coinSearchEl.value.trim()) selectCoin(coinSearchEl.value.trim().toUpperCase());
-  } else if (e.key === 'Escape') {
-    coinDdEl.classList.remove('open');
+function updateSlotDimming() {
+  for (var i=0;i<MAX_SLOTS;i++) {
+    var card = el('slotCard_'+i);
+    if (card) { if (i < currentLayout) card.classList.remove('dimmed'); else card.classList.add('dimmed'); }
   }
-});
+}
 
-coinDdEl.addEventListener('click', function(e) {
-  const item = e.target.closest('.coin-item');
-  if (item) selectCoin(item.dataset.coin);
-});
-
-document.addEventListener('click', function(e) {
-  if (!e.target.closest('.coin-wrap')) coinDdEl.classList.remove('open');
-});
-
-document.getElementById('exchange').addEventListener('change', async function() {
-  const ex = this.value;
-  rebuildIntervals(ex, document.getElementById('interval').value);
-  rebuildQuoteOptions(ex, document.getElementById('quote').value);
-  await fetchPairs(ex);
-  document.getElementById('coin').value = '';
-  document.getElementById('coinSearch').value = '';
-  renderCoinDropdown('');
-});
-
-document.getElementById('quote').addEventListener('change', async function() {
-  await fetchPairs(document.getElementById('exchange').value);
-  document.getElementById('coin').value = '';
-  document.getElementById('coinSearch').value = '';
-  renderCoinDropdown('');
-});
-
-document.getElementById('interval').addEventListener('change', updateAutoInfo);
-document.getElementById('autoCandles').addEventListener('change', updateAutoInfo);
-document.getElementById('numCandles').addEventListener('input', updateAutoInfo);
 function toast(msg, err) {
-  const t = document.getElementById('toast');
+  var t = el('toast');
   t.textContent = msg;
   t.className = 'toast' + (err ? ' error' : '') + ' show';
   setTimeout(function(){t.className='toast';}, 2500);
@@ -1143,220 +1302,164 @@ function toast(msg, err) {
 let configLoaded = false;
 async function loadConfig() {
   try {
-    const r = await authFetch('/api/status');
-    const d = await r.json();
+    var r = await authFetch('/api/status');
+    var d = await r.json();
 
-    const ex = d.exchange || 'hyperliquid';
-    document.getElementById('exchange').value = ex;
-    rebuildIntervals(ex, d.interval || '5m');
+    // Layout
+    currentLayout = d.layout || 1;
+    var radios = document.querySelectorAll('input[name="layout"]');
+    for (var i=0;i<radios.length;i++) radios[i].checked = (parseInt(radios[i].value) === currentLayout);
+    updateSlotDimming();
 
-    rebuildQuoteOptions(ex, d.quote || 'USDT');
-    document.getElementById('coin').value = d.coin || '';
-    document.getElementById('coinSearch').value = d.coin || '';
-    document.getElementById('quote').value = d.quote || 'USDT';
-    document.getElementById('autoCandles').checked = d.autoCandles;
-    document.getElementById('numCandles').value = d.numCandles || 60;
-    document.getElementById('refreshMin').value = d.refreshMin || 5;
-    document.getElementById('emaFast').value = d.emaFast || 9;
-    document.getElementById('emaSlow').value = d.emaSlow || 21;
-    document.getElementById('rsiPeriod').value = d.rsiPeriod || 14;
-    document.getElementById('tzOffset').value = String(d.tzOffset || 0);
-    document.getElementById('fullRefEvery').value = d.fullRefEvery || 10;
-    document.getElementById('partialPct').value = d.partialPct || 40;
-    document.getElementById('heikinAshi').checked = d.heikinAshi || false;
-    document.getElementById('ssid').value = d.ssid || '';
-    document.getElementById('uiUser').value = d.uiUser || '';
-    document.getElementById('uiPass').value = '';
+    // Global settings
+    el('refreshMin').value = d.refreshMin || 5;
+    el('tzOffset').value = String(d.tzOffset || 0);
+    el('fullRefEvery').value = d.fullRefEvery || 10;
+    el('partialPct').value = d.partialPct || 40;
+    el('ssid').value = d.ssid || '';
+    el('uiUser').value = d.uiUser || '';
+    el('uiPass').value = '';
     setAuthHeader();
 
-    document.getElementById('pillIp').textContent = d.apMode ? ('AP: ' + d.apIP) : d.ip;
-    if (d.apMode) {
-      document.getElementById('pillWifi').textContent = 'AP Mode';
-      document.getElementById('pillWifi').className = 'pill warn';
-    } else if (d.rssi) {
-      document.getElementById('pillWifi').textContent = 'WiFi ' + d.rssi + 'dBm';
-      document.getElementById('pillWifi').className = 'pill live';
-    }
-    if (d.price > 0) {
-      const sign = d.pctChange >= 0 ? '+' : '';
-      document.getElementById('pillPrice').textContent = d.coin + ' $' + d.price.toFixed(2) + ' ' + sign + d.pctChange.toFixed(2) + '%';
-      document.getElementById('pillPrice').className = 'pill ' + (d.pctChange >= 0 ? 'live' : 'warn');
-    }
-    if (d.uptime) document.getElementById('pillUptime').textContent = d.uptime;
-    if (d.heap) document.getElementById('pillUptime').textContent += ' | ' + Math.round(d.heap/1024) + 'KB free';
-    if (d.fails > 0) {
-      document.getElementById('pillUptime').textContent += ' | ' + d.fails + ' fails';
-      document.getElementById('pillUptime').className = 'pill warn';
-    } else {
-      document.getElementById('pillUptime').className = 'pill';
+    // Per-slot config
+    var slots = d.slots || [];
+    for (var i=0;i<MAX_SLOTS;i++) {
+      var s = slots[i] || {};
+      var ex = s.exchange || 'hyperliquid';
+      el('exchange_'+i).value = ex;
+      rebuildIntervals(i, ex, s.interval || '5m');
+      rebuildQuoteOptions(i, ex, s.quote || 'USDT');
+      el('coin_'+i).value = s.coin || '';
+      el('coinSearch_'+i).value = s.coin || '';
+      el('quote_'+i).value = s.quote || 'USDT';
+      el('autoCandles_'+i).checked = s.autoCandles !== false;
+      el('numCandles_'+i).value = s.numCandles || 60;
+      el('emaFast_'+i).value = s.emaFast || 9;
+      el('emaSlow_'+i).value = s.emaSlow || 21;
+      el('rsiPeriod_'+i).value = s.rsiPeriod || 14;
+      el('heikinAshi_'+i).checked = s.heikinAshi || false;
+      updateSlotAutoInfo(i);
     }
 
-    updateAutoInfo();
+    // Status pills
+    el('pillIp').textContent = d.apMode ? ('AP: ' + d.apIP) : d.ip;
+    if (d.apMode) { el('pillWifi').textContent='AP Mode'; el('pillWifi').className='pill warn'; }
+    else if (d.rssi) { el('pillWifi').textContent='WiFi '+d.rssi+'dBm'; el('pillWifi').className='pill live'; }
 
-    // Fetch pairs on first load
+    // Price pill from slot 0
+    var s0 = slots[0] || {};
+    if (s0.price > 0) {
+      var sign = s0.pctChange >= 0 ? '+' : '';
+      el('pillPrice').textContent = s0.coin+' $'+s0.price.toFixed(2)+' '+sign+s0.pctChange.toFixed(2)+'%';
+      el('pillPrice').className = 'pill ' + (s0.pctChange >= 0 ? 'live' : 'warn');
+    }
+    if (d.uptime) el('pillUptime').textContent = d.uptime;
+    if (d.heap) el('pillUptime').textContent += ' | '+Math.round(d.heap/1024)+'KB';
+    if (d.fails > 0) { el('pillUptime').textContent += ' | '+d.fails+' fails'; el('pillUptime').className='pill warn'; }
+    else el('pillUptime').className='pill';
+
     if (!configLoaded) {
       configLoaded = true;
-      await fetchPairs(ex);
+      for (var i=0;i<MAX_SLOTS;i++) await fetchPairsForSlot(i, el('exchange_'+i).value);
     }
   } catch(e) { console.error(e); }
 }
 
 async function saveConfig() {
-  const body = {
-    exchange: document.getElementById('exchange').value,
-    coin: document.getElementById('coin').value.toUpperCase().trim(),
-    quote: document.getElementById('quote').value.toUpperCase().trim(),
-    interval: document.getElementById('interval').value,
-    autoCandles: document.getElementById('autoCandles').checked,
-    numCandles: parseInt(document.getElementById('numCandles').value) || 60,
-    refreshMin: parseInt(document.getElementById('refreshMin').value) || 5,
-    emaFast: parseInt(document.getElementById('emaFast').value) || 9,
-    emaSlow: parseInt(document.getElementById('emaSlow').value) || 21,
-    rsiPeriod: parseInt(document.getElementById('rsiPeriod').value) || 14,
-    tzOffset: parseInt(document.getElementById('tzOffset').value) || 0,
-    fullRefEvery: parseInt(document.getElementById('fullRefEvery').value) || 10,
-    partialPct: parseInt(document.getElementById('partialPct').value) || 40,
-    heikinAshi: document.getElementById('heikinAshi').checked,
-    ssid: document.getElementById('ssid').value,
-    pass: document.getElementById('wifipass').value,
-    uiUser: document.getElementById('uiUser').value.trim(),
-    uiPass: document.getElementById('uiPass').value
+  var slotsArr = [];
+  for (var i=0;i<MAX_SLOTS;i++) {
+    slotsArr.push({
+      exchange: el('exchange_'+i).value,
+      coin: el('coin_'+i).value.toUpperCase().trim(),
+      quote: el('quote_'+i).value.toUpperCase().trim(),
+      interval: el('interval_'+i).value,
+      autoCandles: el('autoCandles_'+i).checked,
+      numCandles: parseInt(el('numCandles_'+i).value) || 60,
+      emaFast: parseInt(el('emaFast_'+i).value) || 9,
+      emaSlow: parseInt(el('emaSlow_'+i).value) || 21,
+      rsiPeriod: parseInt(el('rsiPeriod_'+i).value) || 14,
+      heikinAshi: el('heikinAshi_'+i).checked
+    });
+  }
+  var body = {
+    layout: currentLayout,
+    slots: slotsArr,
+    refreshMin: parseInt(el('refreshMin').value) || 5,
+    tzOffset: parseInt(el('tzOffset').value) || 0,
+    fullRefEvery: parseInt(el('fullRefEvery').value) || 10,
+    partialPct: parseInt(el('partialPct').value) || 40,
+    ssid: el('ssid').value,
+    pass: el('wifipass').value,
+    uiUser: el('uiUser').value.trim(),
+    uiPass: el('uiPass').value
   };
   setAuthHeader();
   try {
-    const r = await authFetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    var r = await authFetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     if (r.ok) toast('Config saved'); else toast('Save failed', true);
   } catch(e) { toast('Connection error', true); }
 }
 
 async function refreshNow() {
-  try {
-    await authFetch('/api/refresh', {method:'POST'});
-    toast('Display refresh triggered');
-  } catch(e) { toast('Failed', true); }
+  try { await authFetch('/api/refresh', {method:'POST'}); toast('Display refresh triggered'); } catch(e) { toast('Failed', true); }
 }
 
 async function rebootDevice() {
   if (!confirm('Reboot the device?')) return;
-  try {
-    await authFetch('/api/restart', {method:'POST'});
-    toast('Rebooting...');
-  } catch(e) { toast('Rebooting...'); }
+  try { await authFetch('/api/restart', {method:'POST'}); toast('Rebooting...'); } catch(e) { toast('Rebooting...'); }
 }
 
-function refreshPreview() {
-  const img = document.getElementById('displayPreview');
-  img.src = '/api/display?t=' + Date.now();
-}
+function refreshPreview() { el('displayPreview').src = '/api/display?t=' + Date.now(); }
 setInterval(refreshPreview, 30000);
-
 
 let firmwareUnlocked = false;
 let firmwareUnlockPending = false;
 
 function setFirmwareUnlocked(unlocked) {
   firmwareUnlocked = !!unlocked;
-  const fileInput = document.getElementById('fwFile');
-  const btn = document.getElementById('fwUploadBtn');
-  const hint = document.getElementById('fwUnlockHint');
-  fileInput.disabled = !firmwareUnlocked;
-  btn.disabled = !firmwareUnlocked;
-  fileInput.style.opacity = firmwareUnlocked ? '1' : '.65';
-  btn.style.opacity = firmwareUnlocked ? '1' : '.65';
-  fileInput.style.cursor = firmwareUnlocked ? 'pointer' : 'not-allowed';
-  btn.style.cursor = firmwareUnlocked ? 'pointer' : 'not-allowed';
-  hint.textContent = firmwareUnlocked
-    ? 'Firmware update unlocked. Device display is now in update-ready mode.'
-    : 'Slide all the way right to unlock firmware update and arm on-device update screen';
+  var fi = el('fwFile'), btn = el('fwUploadBtn'), hint = el('fwUnlockHint');
+  fi.disabled = !firmwareUnlocked; btn.disabled = !firmwareUnlocked;
+  fi.style.opacity = btn.style.opacity = firmwareUnlocked ? '1' : '.65';
+  fi.style.cursor = btn.style.cursor = firmwareUnlocked ? 'pointer' : 'not-allowed';
+  hint.textContent = firmwareUnlocked ? 'Firmware update unlocked.' : 'Slide all the way right to unlock firmware update';
 }
 
 async function armFirmwareUpdateScreen() {
   if (firmwareUnlockPending || firmwareUnlocked) return;
   firmwareUnlockPending = true;
   try {
-    const r = await authFetch('/api/update/arm', {method:'POST'});
+    var r = await authFetch('/api/update/arm', {method:'POST'});
     if (!r.ok) throw new Error('arm failed');
-    setFirmwareUnlocked(true);
-    toast('Firmware update unlocked');
-  } catch(e) {
-    const slider = document.getElementById('fwUnlock');
-    slider.value = 0;
-    setFirmwareUnlocked(false);
-    toast('Unable to unlock update mode', true);
-  } finally {
-    firmwareUnlockPending = false;
-  }
+    setFirmwareUnlocked(true); toast('Firmware update unlocked');
+  } catch(e) { el('fwUnlock').value=0; setFirmwareUnlocked(false); toast('Unable to unlock update mode', true); }
+  finally { firmwareUnlockPending = false; }
 }
 
-function onFirmwareUnlockSlide(v) {
-  if (firmwareUnlocked) return;
-  if (Number(v) < 96) return;
-  armFirmwareUpdateScreen();
-}
-
-function onFirmwareUnlockRelease() {
-  const slider = document.getElementById('fwUnlock');
-  if (!firmwareUnlocked) slider.value = 0;
-}
+function onFirmwareUnlockSlide(v) { if (!firmwareUnlocked && Number(v) >= 96) armFirmwareUpdateScreen(); }
+function onFirmwareUnlockRelease() { if (!firmwareUnlocked) el('fwUnlock').value = 0; }
 
 function uploadFirmware() {
-  const fileInput = document.getElementById('fwFile');
-  if (!firmwareUnlocked) { toast('Slide to unlock firmware update first', true); return; }
-  if (!fileInput.files.length) { toast('Select a .bin file first', true); return; }
+  var fi = el('fwFile');
+  if (!firmwareUnlocked) { toast('Slide to unlock first', true); return; }
+  if (!fi.files.length) { toast('Select a .bin file first', true); return; }
   if (!confirm('Upload firmware and reboot?')) return;
-
-  const file = fileInput.files[0];
-  const formData = new FormData();
-  formData.append('update', file);
-
-  document.getElementById('fwUnlock').disabled = true;
-  const xhr = new XMLHttpRequest();
-  const progress = document.getElementById('fwProgress');
-  const bar = document.getElementById('fwBar');
-  const pct = document.getElementById('fwPct');
+  var formData = new FormData(); formData.append('update', fi.files[0]);
+  el('fwUnlock').disabled = true;
+  var xhr = new XMLHttpRequest();
+  var progress = el('fwProgress'), bar = el('fwBar'), pctEl = el('fwPct');
   progress.style.display = 'block';
-
-  let pollTimer = null;
-  const setPct = (p) => {
-    const v = Math.max(0, Math.min(100, Number(p) || 0));
-    bar.style.width = v + '%';
-    pct.textContent = v + '%';
-  };
-
-  const startPoll = () => {
-    pollTimer = setInterval(async () => {
-      try {
-        const r = await authFetch('/api/status');
-        if (!r.ok) return;
-        const d = await r.json();
-        if (typeof d.otaProgress === 'number') setPct(d.otaProgress);
-      } catch(e) {}
-    }, 500);
-  };
-
-  xhr.onload = function() {
-    if (pollTimer) clearInterval(pollTimer);
-    if (xhr.status === 200) {
-      setPct(100);
-      toast('Firmware updated — rebooting...');
-      setTimeout(function() { location.reload(); }, 10000);
-    } else {
-      document.getElementById('fwUnlock').disabled = false;
-      toast('Update failed: ' + xhr.responseText, true);
-    }
-  };
-
-  xhr.onerror = function() {
-    if (pollTimer) clearInterval(pollTimer);
-    toast('Upload error', true);
-  };
-
-  xhr.open('POST', '/api/update');
+  var pollTimer = null;
+  var setPct = function(p){ var v=Math.max(0,Math.min(100,Number(p)||0)); bar.style.width=v+'%'; pctEl.textContent=v+'%'; };
+  var startPoll = function(){ pollTimer=setInterval(async function(){ try{var r=await authFetch('/api/status');if(!r.ok)return;var d=await r.json();if(typeof d.otaProgress==='number')setPct(d.otaProgress);}catch(e){}},500); };
+  xhr.onload = function(){ if(pollTimer)clearInterval(pollTimer); if(xhr.status===200){setPct(100);toast('Firmware updated');setTimeout(function(){location.reload();},10000);}else{el('fwUnlock').disabled=false;toast('Update failed',true);} };
+  xhr.onerror = function(){ if(pollTimer)clearInterval(pollTimer); toast('Upload error',true); };
+  xhr.open('POST','/api/update');
   if (authHeader) xhr.setRequestHeader('Authorization', authHeader);
-  startPoll();
-  xhr.send(formData);
+  startPoll(); xhr.send(formData);
 }
 
+// Initialize
+buildSlotCards();
 setFirmwareUnlocked(false);
 loadConfig();
 setInterval(loadConfig, 30000);
@@ -1374,30 +1477,32 @@ void handleRoot() {
 }
 
 void handleStatus() {
-    int nc = getNumCandles();
-    char span[16];
-    timeSpanStr(cfgInterval, nc, span, sizeof(span));
-
     unsigned long uptimeSec = (millis() - bootTime) / 1000;
     int uh = uptimeSec / 3600, um = (uptimeSec % 3600) / 60;
     char uptimeStr[16];
     snprintf(uptimeStr, sizeof(uptimeStr), "%dh %dm", uh, um);
 
-    DynamicJsonDocument doc(1024);
-    doc["exchange"] = cfgExchange;
-    doc["coin"] = cfgCoin;
-    doc["quote"] = cfgQuote;
-    doc["interval"] = cfgInterval;
-    doc["autoCandles"] = cfgAutoCandles;
-    doc["numCandles"] = nc;
+    DynamicJsonDocument doc(4096);
+
+    // Backward-compatible top-level fields (from slot 0)
+    doc["exchange"] = slots[0].cfg.exchange;
+    doc["coin"] = slots[0].cfg.coin;
+    doc["quote"] = slots[0].cfg.quote;
+    doc["interval"] = slots[0].cfg.interval;
+    doc["autoCandles"] = slots[0].cfg.autoCandles;
+    doc["numCandles"] = slots[0].cfg.numCandles;
+    doc["emaFast"] = slots[0].cfg.emaFast;
+    doc["emaSlow"] = slots[0].cfg.emaSlow;
+    doc["rsiPeriod"] = slots[0].cfg.rsiPeriod;
+    doc["heikinAshi"] = slots[0].cfg.heikinAshi;
+
+    // Global settings
+    doc["layout"] = cfgLayout;
     doc["refreshMin"] = cfgRefreshMin;
-    doc["emaFast"] = cfgEmaFast;
-    doc["emaSlow"] = cfgEmaSlow;
-    doc["rsiPeriod"] = cfgRsiPeriod;
     doc["tzOffset"] = cfgTzOffset;
     doc["fullRefEvery"] = cfgFullRefEvery;
     doc["partialPct"] = cfgPartialPct;
-    doc["heikinAshi"] = cfgHeikinAshi;
+
     bool canViewSensitive = !authEnabled() || server.authenticate(cfgUiUser, cfgUiPass);
     doc["ssid"] = canViewSensitive ? cfgSSID : "";
     doc["uiUser"] = canViewSensitive ? cfgUiUser : "";
@@ -1407,15 +1512,32 @@ void handleStatus() {
     doc["apMode"] = apModeActive;
     doc["apIP"] = WiFi.softAPIP().toString();
     doc["rssi"] = WiFi.RSSI();
-    doc["price"] = lastPrice;
-    doc["pctChange"] = lastPctChange;
-    doc["timeSpan"] = span;
+    doc["price"] = slots[0].lastPrice;
+    doc["pctChange"] = slots[0].lastPctChange;
     doc["uptime"] = uptimeStr;
     doc["fails"] = consecutiveFails;
     doc["otaActive"] = otaActive;
     doc["otaProgress"] = otaProgressPct;
     doc["otaFailed"] = otaFailed;
     doc["heap"] = ESP.getFreeHeap();
+
+    // Per-slot config array
+    JsonArray slotsArr = doc.createNestedArray("slots");
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        JsonObject s = slotsArr.createNestedObject();
+        s["exchange"] = slots[i].cfg.exchange;
+        s["coin"] = slots[i].cfg.coin;
+        s["quote"] = slots[i].cfg.quote;
+        s["interval"] = slots[i].cfg.interval;
+        s["autoCandles"] = slots[i].cfg.autoCandles;
+        s["numCandles"] = slots[i].cfg.numCandles;
+        s["emaFast"] = slots[i].cfg.emaFast;
+        s["emaSlow"] = slots[i].cfg.emaSlow;
+        s["rsiPeriod"] = slots[i].cfg.rsiPeriod;
+        s["heikinAshi"] = slots[i].cfg.heikinAshi;
+        s["price"] = slots[i].lastPrice;
+        s["pctChange"] = slots[i].lastPctChange;
+    }
 
     String out;
     serializeJson(doc, out);
@@ -1429,63 +1551,110 @@ void handleConfigPost() {
         return;
     }
 
-    DynamicJsonDocument doc(1536);
+    DynamicJsonDocument doc(4096);
     DeserializationError err = deserializeJson(doc, server.arg("plain"));
     if (err) {
         server.send(400, "application/json", "{\"error\":\"bad json\"}");
         return;
     }
 
-    char tmpExchange[sizeof(cfgExchange)];
-    char tmpCoin[sizeof(cfgCoin)];
-    char tmpQuote[sizeof(cfgQuote)];
-    char tmpInterval[sizeof(cfgInterval)];
-
-    copyBounded(tmpExchange, sizeof(tmpExchange), cfgExchange);
-    copyBounded(tmpCoin, sizeof(tmpCoin), cfgCoin);
-    copyBounded(tmpQuote, sizeof(tmpQuote), cfgQuote);
-    copyBounded(tmpInterval, sizeof(tmpInterval), cfgInterval);
-
-    if (doc.containsKey("exchange")) copyBounded(tmpExchange, sizeof(tmpExchange), doc["exchange"].as<const char*>());
-    if (doc.containsKey("coin"))     copyBounded(tmpCoin, sizeof(tmpCoin), doc["coin"].as<const char*>());
-    if (doc.containsKey("quote"))    copyBounded(tmpQuote, sizeof(tmpQuote), doc["quote"].as<const char*>());
-    if (doc.containsKey("interval")) copyBounded(tmpInterval, sizeof(tmpInterval), doc["interval"].as<const char*>());
-
-    toUpperInPlace(tmpCoin);
-    toUpperInPlace(tmpQuote);
-
-    if (!isValidExchange(tmpExchange)) { server.send(400, "application/json", "{\"error\":\"invalid exchange\"}"); return; }
-    if (!isValidInterval(tmpInterval)) { server.send(400, "application/json", "{\"error\":\"invalid interval\"}"); return; }
-    if (!isValidSymbolToken(tmpCoin, sizeof(tmpCoin))) { server.send(400, "application/json", "{\"error\":\"invalid coin\"}"); return; }
-    if (!isValidSymbolToken(tmpQuote, sizeof(tmpQuote))) { server.send(400, "application/json", "{\"error\":\"invalid quote\"}"); return; }
-
-    copyBounded(cfgExchange, sizeof(cfgExchange), tmpExchange);
-    copyBounded(cfgCoin, sizeof(cfgCoin), tmpCoin);
-    copyBounded(cfgQuote, sizeof(cfgQuote), tmpQuote);
-    copyBounded(cfgInterval, sizeof(cfgInterval), tmpInterval);
-
-    if (doc.containsKey("autoCandles")) cfgAutoCandles  = doc["autoCandles"].as<bool>();
-    if (doc.containsKey("numCandles"))  cfgNumCandles   = constrain(doc["numCandles"].as<int>(), 5, MAX_CANDLES);
+    // Global settings
+    if (doc.containsKey("layout")) {
+        int layout = doc["layout"].as<int>();
+        if (layout >= 1 && layout <= 4) cfgLayout = layout;
+    }
     if (doc.containsKey("refreshMin"))  cfgRefreshMin   = constrain(doc["refreshMin"].as<int>(), 1, 60);
-    if (doc.containsKey("emaFast"))     cfgEmaFast      = constrain(doc["emaFast"].as<int>(), 2, 100);
-    if (doc.containsKey("emaSlow"))     cfgEmaSlow      = constrain(doc["emaSlow"].as<int>(), 2, 200);
-    if (doc.containsKey("rsiPeriod"))   cfgRsiPeriod    = constrain(doc["rsiPeriod"].as<int>(), 2, 100);
     if (doc.containsKey("tzOffset"))    cfgTzOffset     = doc["tzOffset"].as<int>();
     if (doc.containsKey("fullRefEvery"))cfgFullRefEvery = constrain(doc["fullRefEvery"].as<int>(), 1, 50);
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
-    if (doc.containsKey("heikinAshi"))  cfgHeikinAshi   = doc["heikinAshi"].as<bool>();
 
     if (doc.containsKey("ssid") && strlen(doc["ssid"].as<const char*>()) > 0)
         copyBounded(cfgSSID, sizeof(cfgSSID), doc["ssid"].as<const char*>());
     if (doc.containsKey("pass") && strlen(doc["pass"].as<const char*>()) > 0)
         copyBounded(cfgPass, sizeof(cfgPass), doc["pass"].as<const char*>());
-
-    if (doc.containsKey("uiUser")) {
+    if (doc.containsKey("uiUser"))
         copyBounded(cfgUiUser, sizeof(cfgUiUser), doc["uiUser"].as<const char*>());
-    }
-    if (doc.containsKey("uiPass")) {
+    if (doc.containsKey("uiPass"))
         copyBounded(cfgUiPass, sizeof(cfgUiPass), doc["uiPass"].as<const char*>());
+
+    // Per-slot config from "slots" array
+    if (doc.containsKey("slots")) {
+        JsonArray slotsArr = doc["slots"].as<JsonArray>();
+        for (int i = 0; i < MAX_SLOTS && i < (int)slotsArr.size(); i++) {
+            JsonObject s = slotsArr[i].as<JsonObject>();
+            SlotConfig& sc = slots[i].cfg;
+
+            char tmpExchange[16], tmpCoin[16], tmpQuote[8], tmpInterval[8];
+            copyBounded(tmpExchange, sizeof(tmpExchange), sc.exchange);
+            copyBounded(tmpCoin, sizeof(tmpCoin), sc.coin);
+            copyBounded(tmpQuote, sizeof(tmpQuote), sc.quote);
+            copyBounded(tmpInterval, sizeof(tmpInterval), sc.interval);
+
+            if (s.containsKey("exchange")) copyBounded(tmpExchange, sizeof(tmpExchange), s["exchange"].as<const char*>());
+            if (s.containsKey("coin"))     copyBounded(tmpCoin, sizeof(tmpCoin), s["coin"].as<const char*>());
+            if (s.containsKey("quote"))    copyBounded(tmpQuote, sizeof(tmpQuote), s["quote"].as<const char*>());
+            if (s.containsKey("interval")) copyBounded(tmpInterval, sizeof(tmpInterval), s["interval"].as<const char*>());
+
+            toUpperInPlace(tmpCoin);
+            toUpperInPlace(tmpQuote);
+
+            if (isValidExchange(tmpExchange))
+                copyBounded(sc.exchange, sizeof(sc.exchange), tmpExchange);
+            if (isValidInterval(tmpInterval))
+                copyBounded(sc.interval, sizeof(sc.interval), tmpInterval);
+            if (isValidSymbolToken(tmpCoin, sizeof(tmpCoin)))
+                copyBounded(sc.coin, sizeof(sc.coin), tmpCoin);
+            if (isValidSymbolToken(tmpQuote, sizeof(tmpQuote)))
+                copyBounded(sc.quote, sizeof(sc.quote), tmpQuote);
+
+            if (s.containsKey("autoCandles")) sc.autoCandles = s["autoCandles"].as<bool>();
+            if (s.containsKey("numCandles"))  sc.numCandles  = constrain(s["numCandles"].as<int>(), 5, MAX_CANDLES);
+            if (s.containsKey("emaFast"))     sc.emaFast     = constrain(s["emaFast"].as<int>(), 2, 100);
+            if (s.containsKey("emaSlow"))     sc.emaSlow     = constrain(s["emaSlow"].as<int>(), 2, 200);
+            if (s.containsKey("rsiPeriod"))   sc.rsiPeriod   = constrain(s["rsiPeriod"].as<int>(), 2, 100);
+            if (s.containsKey("heikinAshi"))  sc.heikinAshi  = s["heikinAshi"].as<bool>();
+        }
+    } else {
+        // Backward-compat: old format without "slots" — apply to slot 0
+        SlotConfig& sc = slots[0].cfg;
+        char tmpExchange[16], tmpCoin[16], tmpQuote[8], tmpInterval[8];
+        copyBounded(tmpExchange, sizeof(tmpExchange), sc.exchange);
+        copyBounded(tmpCoin, sizeof(tmpCoin), sc.coin);
+        copyBounded(tmpQuote, sizeof(tmpQuote), sc.quote);
+        copyBounded(tmpInterval, sizeof(tmpInterval), sc.interval);
+
+        if (doc.containsKey("exchange")) copyBounded(tmpExchange, sizeof(tmpExchange), doc["exchange"].as<const char*>());
+        if (doc.containsKey("coin"))     copyBounded(tmpCoin, sizeof(tmpCoin), doc["coin"].as<const char*>());
+        if (doc.containsKey("quote"))    copyBounded(tmpQuote, sizeof(tmpQuote), doc["quote"].as<const char*>());
+        if (doc.containsKey("interval")) copyBounded(tmpInterval, sizeof(tmpInterval), doc["interval"].as<const char*>());
+
+        toUpperInPlace(tmpCoin);
+        toUpperInPlace(tmpQuote);
+
+        if (isValidExchange(tmpExchange)) copyBounded(sc.exchange, sizeof(sc.exchange), tmpExchange);
+        if (isValidInterval(tmpInterval)) copyBounded(sc.interval, sizeof(sc.interval), tmpInterval);
+        if (isValidSymbolToken(tmpCoin, sizeof(tmpCoin))) copyBounded(sc.coin, sizeof(sc.coin), tmpCoin);
+        if (isValidSymbolToken(tmpQuote, sizeof(tmpQuote))) copyBounded(sc.quote, sizeof(sc.quote), tmpQuote);
+
+        if (doc.containsKey("autoCandles")) sc.autoCandles = doc["autoCandles"].as<bool>();
+        if (doc.containsKey("numCandles"))  sc.numCandles  = constrain(doc["numCandles"].as<int>(), 5, MAX_CANDLES);
+        if (doc.containsKey("emaFast"))     sc.emaFast     = constrain(doc["emaFast"].as<int>(), 2, 100);
+        if (doc.containsKey("emaSlow"))     sc.emaSlow     = constrain(doc["emaSlow"].as<int>(), 2, 200);
+        if (doc.containsKey("rsiPeriod"))   sc.rsiPeriod   = constrain(doc["rsiPeriod"].as<int>(), 2, 100);
+        if (doc.containsKey("heikinAshi"))  sc.heikinAshi  = doc["heikinAshi"].as<bool>();
     }
+
+    // Keep scratch globals in sync with slot 0
+    copyBounded(cfgExchange, sizeof(cfgExchange), slots[0].cfg.exchange);
+    copyBounded(cfgCoin, sizeof(cfgCoin), slots[0].cfg.coin);
+    copyBounded(cfgQuote, sizeof(cfgQuote), slots[0].cfg.quote);
+    copyBounded(cfgInterval, sizeof(cfgInterval), slots[0].cfg.interval);
+    cfgNumCandles  = slots[0].cfg.numCandles;
+    cfgAutoCandles = slots[0].cfg.autoCandles;
+    cfgEmaFast     = slots[0].cfg.emaFast;
+    cfgEmaSlow     = slots[0].cfg.emaSlow;
+    cfgRsiPeriod   = slots[0].cfg.rsiPeriod;
+    cfgHeikinAshi  = slots[0].cfg.heikinAshi;
 
     saveConfig();
     configTime(cfgTzOffset, 0, NTP_SERVER);
@@ -2118,6 +2287,65 @@ bool fetchCandles() {
     return ok;
 }
 
+// ── Per-slot fetch: swaps globals, fetches, copies results into slot ──
+bool fetchSlotCandles(int slotIdx) {
+    if (slotIdx < 0 || slotIdx >= MAX_SLOTS) return false;
+    SlotConfig& sc = slots[slotIdx].cfg;
+
+    // Save current globals
+    char savedExchange[16], savedCoin[16], savedQuote[8], savedInterval[8];
+    copyBounded(savedExchange, sizeof(savedExchange), cfgExchange);
+    copyBounded(savedCoin,     sizeof(savedCoin),     cfgCoin);
+    copyBounded(savedQuote,    sizeof(savedQuote),    cfgQuote);
+    copyBounded(savedInterval, sizeof(savedInterval), cfgInterval);
+    int savedNumCandles = cfgNumCandles;
+    bool savedAutoCandles = cfgAutoCandles;
+    int savedEmaFast = cfgEmaFast;
+    int savedEmaSlow = cfgEmaSlow;
+    int savedRsiPeriod = cfgRsiPeriod;
+    bool savedHeikinAshi = cfgHeikinAshi;
+
+    // Set globals to this slot's config
+    copyBounded(cfgExchange, sizeof(cfgExchange), sc.exchange);
+    copyBounded(cfgCoin,     sizeof(cfgCoin),     sc.coin);
+    copyBounded(cfgQuote,    sizeof(cfgQuote),    sc.quote);
+    copyBounded(cfgInterval, sizeof(cfgInterval), sc.interval);
+    cfgNumCandles  = sc.numCandles;
+    cfgAutoCandles = sc.autoCandles;
+    cfgEmaFast     = sc.emaFast;
+    cfgEmaSlow     = sc.emaSlow;
+    cfgRsiPeriod   = sc.rsiPeriod;
+    cfgHeikinAshi  = sc.heikinAshi;
+
+    Serial.printf("Fetching slot %d: %s %s/%s %s\n", slotIdx, sc.exchange, sc.coin, sc.quote, sc.interval);
+    bool ok = fetchCandles();
+
+    if (ok) {
+        // Copy results from scratch globals into slot
+        memcpy(slots[slotIdx].candles, candles, candleCount * sizeof(Candle));
+        memcpy(slots[slotIdx].emaFastArr, emaFast, candleCount * sizeof(float));
+        memcpy(slots[slotIdx].emaSlowArr, emaSlow, candleCount * sizeof(float));
+        memcpy(slots[slotIdx].rsiVal, rsiVal, candleCount * sizeof(float));
+        slots[slotIdx].candleCount = candleCount;
+        slots[slotIdx].lastPrice = lastPrice;
+        slots[slotIdx].lastPctChange = lastPctChange;
+    }
+
+    // Restore globals
+    copyBounded(cfgExchange, sizeof(cfgExchange), savedExchange);
+    copyBounded(cfgCoin,     sizeof(cfgCoin),     savedCoin);
+    copyBounded(cfgQuote,    sizeof(cfgQuote),    savedQuote);
+    copyBounded(cfgInterval, sizeof(cfgInterval), savedInterval);
+    cfgNumCandles  = savedNumCandles;
+    cfgAutoCandles = savedAutoCandles;
+    cfgEmaFast     = savedEmaFast;
+    cfgEmaSlow     = savedEmaSlow;
+    cfgRsiPeriod   = savedRsiPeriod;
+    cfgHeikinAshi  = savedHeikinAshi;
+
+    return ok;
+}
+
 // ═══════════════════════════════════════════════════════
 // RENDER CHART
 // ═══════════════════════════════════════════════════════
@@ -2263,26 +2491,45 @@ int choosePriceLabelDecimals(float priceLo, float priceRange) {
     return 6;
 }
 
-void renderChart() {
-    bufClear();
+void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
+    const SlotConfig& sc = slot.cfg;
+    bool isFullScreen = (vp.w >= 700 && vp.h >= 400);
+    bool isHalf = (vp.w >= 700 && !isFullScreen);
 
-    if (candleCount == 0) {
-        drawString(SCR_W / 2 - 60, SCR_H / 2, "NO DATA", 2);
+    // Adaptive layout values based on viewport size
+    int mT = isFullScreen ? 35 : 18;
+    int mB = isFullScreen ? 25 : 12;
+    int mL = (vp.w >= 600) ? 10 : 6;
+    int mR = isFullScreen ? 85 : (vp.w >= 500 ? 55 : 45);
+    int rH = isFullScreen ? 45 : 25;
+    int vH = isFullScreen ? 30 : 18;
+    int gp = isFullScreen ? 5 : 3;
+    int titleScale = isFullScreen ? 2 : 1;
+    int priceScale = isFullScreen ? 2 : 1;
+
+    // Compute derived layout relative to viewport
+    int chartW = vp.w - mL - mR;
+    int rsiTop = vp.y + vp.h - mB - vH - gp - rH;
+    int chartH = rsiTop - gp - (vp.y + mT);
+    int volTop = vp.y + vp.h - mB - vH;
+
+    if (slot.candleCount == 0) {
+        drawString(vp.x + vp.w / 2 - 21, vp.y + vp.h / 2 - 3, "NO DATA", 1);
         return;
     }
 
     // Runtime candle geometry
-    int candleGap  = 2;
-    int candleW    = (CHART_W - (candleCount - 1) * candleGap) / candleCount;
+    int candleGap  = (vp.w < 500) ? 1 : 2;
+    int candleW    = (chartW - (slot.candleCount - 1) * candleGap) / slot.candleCount;
     if (candleW < 1) candleW = 1;
     int candleStep = candleW + candleGap;
 
     // Price range
     float priceHi = -1e9, priceLo = 1e9, volMax = 0;
-    for (int i = 0; i < candleCount; i++) {
-        if (candles[i].h > priceHi) priceHi = candles[i].h;
-        if (candles[i].l < priceLo) priceLo = candles[i].l;
-        if (candles[i].v > volMax)  volMax  = candles[i].v;
+    for (int i = 0; i < slot.candleCount; i++) {
+        if (slot.candles[i].h > priceHi) priceHi = slot.candles[i].h;
+        if (slot.candles[i].l < priceLo) priceLo = slot.candles[i].l;
+        if (slot.candles[i].v > volMax)  volMax  = slot.candles[i].v;
     }
     float priceRange = priceHi - priceLo;
     if (priceRange < 0.01) priceRange = 1.0;
@@ -2290,74 +2537,87 @@ void renderChart() {
     priceHi += pad; priceLo -= pad;
     priceRange = priceHi - priceLo;
 
-    float priceToYPx = (float)CHART_H / priceRange;
+    if (chartH < 1) chartH = 1;
+    float priceToYPx = (float)chartH / priceRange;
     auto priceToY = [&](float p) -> int {
-        return MARGIN_T + CHART_H - (int)((p - priceLo) * priceToYPx);
+        return (vp.y + mT) + chartH - (int)((p - priceLo) * priceToYPx);
     };
 
     // ── Title bar ──
-    float pctChange = lastPctChange;
+    float pctChange = slot.lastPctChange;
     char pctSign = (pctChange >= 0) ? '+' : '-';
     float absPct = (pctChange < 0) ? -pctChange : pctChange;
 
-    // Build short exchange label for display
     char exLabel[12];
-    if (strcmp(cfgExchange, "hyperliquid") == 0) strncpy(exLabel, "HL", sizeof(exLabel));
-    else if (strcmp(cfgExchange, "binance") == 0) strncpy(exLabel, "BIN", sizeof(exLabel));
-    else if (strcmp(cfgExchange, "asterdex") == 0) strncpy(exLabel, "ASTER", sizeof(exLabel));
-    else if (strcmp(cfgExchange, "kraken") == 0) strncpy(exLabel, "KRK", sizeof(exLabel));
-    else if (strcmp(cfgExchange, "poloniex") == 0) strncpy(exLabel, "POLO", sizeof(exLabel));
-    else strncpy(exLabel, cfgExchange, sizeof(exLabel));
+    if (strcmp(sc.exchange, "hyperliquid") == 0) strncpy(exLabel, "HL", sizeof(exLabel));
+    else if (strcmp(sc.exchange, "binance") == 0) strncpy(exLabel, "BIN", sizeof(exLabel));
+    else if (strcmp(sc.exchange, "asterdex") == 0) strncpy(exLabel, "ASTER", sizeof(exLabel));
+    else if (strcmp(sc.exchange, "kraken") == 0) strncpy(exLabel, "KRK", sizeof(exLabel));
+    else if (strcmp(sc.exchange, "poloniex") == 0) strncpy(exLabel, "POLO", sizeof(exLabel));
+    else strncpy(exLabel, sc.exchange, sizeof(exLabel));
 
     char title[80];
-    snprintf(title, sizeof(title), "%s:%s/%s  %s%s", exLabel, cfgCoin, cfgQuote, cfgInterval,
-             cfgHeikinAshi ? "  HA" : "");
-    drawString(MARGIN_L, 5, title, 2);
+    if (vp.w < 500) {
+        // Quarter mode: compact title
+        snprintf(title, sizeof(title), "%s:%s %s%s", exLabel, sc.coin, sc.interval,
+                 sc.heikinAshi ? " HA" : "");
+    } else {
+        snprintf(title, sizeof(title), "%s:%s/%s  %s%s", exLabel, sc.coin, sc.quote, sc.interval,
+                 sc.heikinAshi ? "  HA" : "");
+    }
+    drawString(vp.x + mL, vp.y + (isFullScreen ? 5 : 3), title, titleScale);
 
-    char legend[48];
-    snprintf(legend, sizeof(legend), "EMA%d/EMA%d  RSI%d:%.0f",
-             cfgEmaFast, cfgEmaSlow, cfgRsiPeriod, rsiVal[candleCount - 1]);
-    drawString(MARGIN_L + strlen(title) * 12 + 20, 12, legend, 1);
+    // Legend line (EMA/RSI info) — only if there's room
+    if (isFullScreen) {
+        char legend[48];
+        snprintf(legend, sizeof(legend), "EMA%d/EMA%d  RSI%d:%.0f",
+                 sc.emaFast, sc.emaSlow, sc.rsiPeriod, slot.rsiVal[slot.candleCount - 1]);
+        drawString(vp.x + mL + strlen(title) * 12 + 20, vp.y + 12, legend, 1);
+    }
 
+    // Price + pct on the right
     char priceStr[32];
-    snprintf(priceStr, sizeof(priceStr), "%.2f  %c%.2f%%", lastPrice, pctSign, absPct);
-    drawStringR(SCR_W - 10, 3, priceStr, 2);
+    snprintf(priceStr, sizeof(priceStr), "%.2f %c%.1f%%", slot.lastPrice, pctSign, absPct);
+    drawStringR(vp.x + vp.w - 4, vp.y + (isFullScreen ? 3 : 3), priceStr, priceScale);
 
-    // IP address top-right, below price
-    char ipStr[32];
-    snprintf(ipStr, sizeof(ipStr), "%s", WiFi.localIP().toString().c_str());
-    drawStringR(SCR_W - 10, 22, ipStr, 1);
+    // IP address — only in full-screen single chart mode
+    if (isFullScreen) {
+        char ipStr[32];
+        snprintf(ipStr, sizeof(ipStr), "%s", WiFi.localIP().toString().c_str());
+        drawStringR(vp.x + vp.w - 10, vp.y + 22, ipStr, 1);
+    }
 
-    hLine(0, SCR_W - 1, MARGIN_T - 2);
+    hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
 
     // ── Price grid ──
     int priceLabelDecimals = choosePriceLabelDecimals(priceLo, priceRange);
     char priceFmt[8];
     snprintf(priceFmt, sizeof(priceFmt), "%%.%df", priceLabelDecimals);
 
-    for (int g = 0; g <= 5; g++) {
-        float price = priceLo + priceRange * g / 5;
+    int gridLines = isFullScreen ? 5 : 3;
+    for (int g = 0; g <= gridLines; g++) {
+        float price = priceLo + priceRange * g / gridLines;
         int y = priceToY(price);
-        if (y >= MARGIN_T && y <= MARGIN_T + CHART_H) {
-            hLineDash(MARGIN_L, MARGIN_L + CHART_W, y);
+        if (y >= vp.y + mT && y <= vp.y + mT + chartH) {
+            hLineDash(vp.x + mL, vp.x + mL + chartW, y);
             char lbl[16];
             snprintf(lbl, sizeof(lbl), priceFmt, price);
-            int lblY = constrain(y - 3, MARGIN_T + 1, MARGIN_T + CHART_H - 7);
-            drawString(MARGIN_L + CHART_W + 5, lblY, lbl, 1);
+            int lblY = constrain(y - 3, vp.y + mT + 1, vp.y + mT + chartH - 7);
+            drawString(vp.x + mL + chartW + 3, lblY, lbl, 1);
         }
     }
 
     // ── Draw candles ──
-    for (int i = 0; i < candleCount; i++) {
-        int cx = MARGIN_L + i * candleStep;
+    for (int i = 0; i < slot.candleCount; i++) {
+        int cx = vp.x + mL + i * candleStep;
         int candleMid = cx + candleW / 2;
 
-        int yOpen  = constrain(priceToY(candles[i].o), MARGIN_T, MARGIN_T + CHART_H);
-        int yClose = constrain(priceToY(candles[i].c), MARGIN_T, MARGIN_T + CHART_H);
-        int yHigh  = constrain(priceToY(candles[i].h), MARGIN_T, MARGIN_T + CHART_H);
-        int yLow   = constrain(priceToY(candles[i].l), MARGIN_T, MARGIN_T + CHART_H);
+        int yOpen  = constrain(priceToY(slot.candles[i].o), vp.y + mT, vp.y + mT + chartH);
+        int yClose = constrain(priceToY(slot.candles[i].c), vp.y + mT, vp.y + mT + chartH);
+        int yHigh  = constrain(priceToY(slot.candles[i].h), vp.y + mT, vp.y + mT + chartH);
+        int yLow   = constrain(priceToY(slot.candles[i].l), vp.y + mT, vp.y + mT + chartH);
 
-        bool bullish = (candles[i].c >= candles[i].o);
+        bool bullish = (slot.candles[i].c >= slot.candles[i].o);
         int bodyTop = bullish ? yClose : yOpen;
         int bodyBot = bullish ? yOpen  : yClose;
         if (bodyTop == bodyBot) bodyBot = bodyTop + 1;
@@ -2368,100 +2628,154 @@ void renderChart() {
 
         // Volume bar
         if (volMax > 0) {
-            int vHeight = max(1, (int)((candles[i].v / volMax) * VOL_H));
-            int vy = VOL_TOP + VOL_H - vHeight;
+            int vHeight = max(1, (int)((slot.candles[i].v / volMax) * vH));
+            int vy = volTop + vH - vHeight;
             if (bullish) drawRect(cx, vy, candleW, vHeight);
             else         fillRect(cx, vy, candleW, vHeight, true);
         }
     }
 
     // ── EMA lines ──
-    for (int i = 1; i < candleCount; i++) {
-        int x0 = MARGIN_L + (i - 1) * candleStep + candleW / 2;
-        int x1 = MARGIN_L + i * candleStep + candleW / 2;
-        if (i >= cfgEmaFast) {
-            int y0 = constrain(priceToY(emaFast[i-1]), MARGIN_T, MARGIN_T + CHART_H);
-            int y1 = constrain(priceToY(emaFast[i]),   MARGIN_T, MARGIN_T + CHART_H);
+    for (int i = 1; i < slot.candleCount; i++) {
+        int x0 = vp.x + mL + (i - 1) * candleStep + candleW / 2;
+        int x1 = vp.x + mL + i * candleStep + candleW / 2;
+        if (i >= sc.emaFast) {
+            int y0 = constrain(priceToY(slot.emaFastArr[i-1]), vp.y + mT, vp.y + mT + chartH);
+            int y1 = constrain(priceToY(slot.emaFastArr[i]),   vp.y + mT, vp.y + mT + chartH);
             drawLine(x0, y0, x1, y1, false);
         }
-        if (i >= cfgEmaSlow) {
-            int y0 = constrain(priceToY(emaSlow[i-1]), MARGIN_T, MARGIN_T + CHART_H);
-            int y1 = constrain(priceToY(emaSlow[i]),   MARGIN_T, MARGIN_T + CHART_H);
+        if (i >= sc.emaSlow) {
+            int y0 = constrain(priceToY(slot.emaSlowArr[i-1]), vp.y + mT, vp.y + mT + chartH);
+            int y1 = constrain(priceToY(slot.emaSlowArr[i]),   vp.y + mT, vp.y + mT + chartH);
             drawLine(x0, y0, x1, y1, true);
         }
     }
 
     // ── Chart border ──
-    hLine(MARGIN_L, MARGIN_L + CHART_W, MARGIN_T);
-    hLine(MARGIN_L, MARGIN_L + CHART_W, MARGIN_T + CHART_H);
-    vLine(MARGIN_L, MARGIN_T, MARGIN_T + CHART_H);
-    vLine(MARGIN_L + CHART_W, MARGIN_T, MARGIN_T + CHART_H);
+    hLine(vp.x + mL, vp.x + mL + chartW, vp.y + mT);
+    hLine(vp.x + mL, vp.x + mL + chartW, vp.y + mT + chartH);
+    vLine(vp.x + mL, vp.y + mT, vp.y + mT + chartH);
+    vLine(vp.x + mL + chartW, vp.y + mT, vp.y + mT + chartH);
 
     // ── RSI strip ──
-    hLine(MARGIN_L, MARGIN_L + CHART_W, RSI_TOP);
-    hLine(MARGIN_L, MARGIN_L + CHART_W, RSI_TOP + RSI_H);
-    vLine(MARGIN_L, RSI_TOP, RSI_TOP + RSI_H);
-    vLine(MARGIN_L + CHART_W, RSI_TOP, RSI_TOP + RSI_H);
+    hLine(vp.x + mL, vp.x + mL + chartW, rsiTop);
+    hLine(vp.x + mL, vp.x + mL + chartW, rsiTop + rH);
+    vLine(vp.x + mL, rsiTop, rsiTop + rH);
+    vLine(vp.x + mL + chartW, rsiTop, rsiTop + rH);
 
-    int rsi70y = RSI_TOP + RSI_H - (int)(70.0f / 100.0f * RSI_H);
-    int rsi30y = RSI_TOP + RSI_H - (int)(30.0f / 100.0f * RSI_H);
-    int rsi50y = RSI_TOP + RSI_H - (int)(50.0f / 100.0f * RSI_H);
-    hLineDot(MARGIN_L + 1, MARGIN_L + CHART_W - 1, rsi70y);
-    hLineDot(MARGIN_L + 1, MARGIN_L + CHART_W - 1, rsi30y);
-    hLineDot(MARGIN_L + 1, MARGIN_L + CHART_W - 1, rsi50y);
+    int rsi70y = rsiTop + rH - (int)(70.0f / 100.0f * rH);
+    int rsi30y = rsiTop + rH - (int)(30.0f / 100.0f * rH);
+    hLineDot(vp.x + mL + 1, vp.x + mL + chartW - 1, rsi70y);
+    hLineDot(vp.x + mL + 1, vp.x + mL + chartW - 1, rsi30y);
 
-    drawString(MARGIN_L + CHART_W + 5, rsi70y - 3, "70", 1);
-    drawString(MARGIN_L + CHART_W + 5, rsi30y - 3, "30", 1);
-    drawString(MARGIN_L + CHART_W + 5, RSI_TOP + 2, "RSI", 1);
+    if (isFullScreen) {
+        int rsi50y = rsiTop + rH - (int)(50.0f / 100.0f * rH);
+        hLineDot(vp.x + mL + 1, vp.x + mL + chartW - 1, rsi50y);
+    }
 
-    for (int i = cfgRsiPeriod + 1; i < candleCount; i++) {
-        int x0 = MARGIN_L + (i - 1) * candleStep + candleW / 2;
-        int x1 = MARGIN_L + i * candleStep + candleW / 2;
-        int y0 = RSI_TOP + RSI_H - (int)(constrain(rsiVal[i-1], 0.0f, 100.0f) / 100.0f * RSI_H);
-        int y1 = RSI_TOP + RSI_H - (int)(constrain(rsiVal[i],   0.0f, 100.0f) / 100.0f * RSI_H);
-        y0 = constrain(y0, RSI_TOP, RSI_TOP + RSI_H);
-        y1 = constrain(y1, RSI_TOP, RSI_TOP + RSI_H);
+    drawString(vp.x + mL + chartW + 3, rsi70y - 3, "70", 1);
+    drawString(vp.x + mL + chartW + 3, rsi30y - 3, "30", 1);
+    if (isFullScreen || isHalf) {
+        drawString(vp.x + mL + chartW + 3, rsiTop + 2, "RSI", 1);
+    }
+
+    for (int i = sc.rsiPeriod + 1; i < slot.candleCount; i++) {
+        int x0 = vp.x + mL + (i - 1) * candleStep + candleW / 2;
+        int x1 = vp.x + mL + i * candleStep + candleW / 2;
+        int y0 = rsiTop + rH - (int)(constrain(slot.rsiVal[i-1], 0.0f, 100.0f) / 100.0f * rH);
+        int y1 = rsiTop + rH - (int)(constrain(slot.rsiVal[i],   0.0f, 100.0f) / 100.0f * rH);
+        y0 = constrain(y0, rsiTop, rsiTop + rH);
+        y1 = constrain(y1, rsiTop, rsiTop + rH);
         drawLine(x0, y0, x1, y1, false);
     }
 
     // ── Volume separator + label ──
-    hLine(MARGIN_L, MARGIN_L + CHART_W, VOL_TOP - 1);
-    drawString(MARGIN_L + CHART_W + 5, VOL_TOP + 2, "Vol", 1);
+    hLine(vp.x + mL, vp.x + mL + chartW, volTop - 1);
+    if (isFullScreen || isHalf) {
+        drawString(vp.x + mL + chartW + 3, volTop + 2, "Vol", 1);
+    }
 
     // ── Time labels — adaptive spacing ──
-    // Target roughly 6-8 labels across the chart
-    int labelEvery = max(1, candleCount / 7);
-    for (int i = 0; i < candleCount; i += labelEvery) {
-        int cx = MARGIN_L + i * candleStep + candleW / 2;
-        vLine(cx, VOL_TOP + VOL_H + 1, VOL_TOP + VOL_H + 3);
+    int labelTarget = isFullScreen ? 7 : (isHalf ? 6 : 4);
+    int labelEvery = max(1, slot.candleCount / labelTarget);
+    for (int i = 0; i < slot.candleCount; i += labelEvery) {
+        int cx = vp.x + mL + i * candleStep + candleW / 2;
+        vLine(cx, volTop + vH + 1, volTop + vH + 3);
 
-        time_t ts = (time_t)(candles[i].t / 1000ULL);
+        time_t ts = (time_t)(slot.candles[i].t / 1000ULL);
         struct tm* tm_info = gmtime(&ts);
         if (tm_info) {
             char timeLbl[12];
-            // Show date for daily+ intervals, time for sub-daily
-            uint64_t ivMs = intervalToMs(cfgInterval);
+            uint64_t ivMs = intervalToMs(sc.interval);
             if (ivMs >= 86400000ULL)
                 snprintf(timeLbl, sizeof(timeLbl), "%02d/%02d", tm_info->tm_mday, tm_info->tm_mon + 1);
             else
                 snprintf(timeLbl, sizeof(timeLbl), "%02d:%02d", tm_info->tm_hour, tm_info->tm_min);
-            drawString(cx - 12, VOL_TOP + VOL_H + 5, timeLbl, 1);
+            drawString(cx - 12, volTop + vH + 5, timeLbl, 1);
         }
     }
 
-    // ── Footer: timestamp + config URL ──
-    time_t now = time(nullptr);
-    struct tm* t = gmtime(&now);
-    char tsStr[32];
-    snprintf(tsStr, sizeof(tsStr), "%04d-%02d-%02d %02d:%02d UTC",
-             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min);
-    drawStringR(SCR_W - 10, SCR_H - 12, tsStr, 1);
+    // ── Footer — only in full-screen mode ──
+    if (isFullScreen) {
+        time_t now = time(nullptr);
+        struct tm* t = gmtime(&now);
+        char tsStr[32];
+        snprintf(tsStr, sizeof(tsStr), "%04d-%02d-%02d %02d:%02d UTC",
+                 t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min);
+        drawStringR(vp.x + vp.w - 10, vp.y + vp.h - 12, tsStr, 1);
 
-    // Show config URL + IP on display footer
-    char urlStr[64];
-    snprintf(urlStr, sizeof(urlStr), "%s  |  %s.local",
-             WiFi.localIP().toString().c_str(), MDNS_HOST);
-    drawString(MARGIN_L, SCR_H - 12, urlStr, 1);
+        char urlStr[64];
+        snprintf(urlStr, sizeof(urlStr), "%s  |  %s.local",
+                 WiFi.localIP().toString().c_str(), MDNS_HOST);
+        drawString(vp.x + mL, vp.y + vp.h - 12, urlStr, 1);
+    }
+}
+
+// ── Layout orchestrator ──
+void renderAllCharts() {
+    bufClear();
+
+    int activeSlots = cfgLayout;
+    Viewport vps[MAX_SLOTS];
+
+    if (cfgLayout == 1) {
+        vps[0] = {0, 0, 800, 480};
+    } else if (cfgLayout == 2) {
+        vps[0] = {0, 0, 800, 238};
+        vps[1] = {0, 242, 800, 238};
+    } else {
+        // 3 or 4: 2x2 grid
+        vps[0] = {0, 0, 398, 238};
+        vps[1] = {402, 0, 398, 238};
+        vps[2] = {0, 242, 398, 238};
+        if (cfgLayout == 4) {
+            vps[3] = {402, 242, 398, 238};
+        }
+    }
+
+    for (int i = 0; i < activeSlots; i++) {
+        renderSlotChart(vps[i], slots[i]);
+    }
+
+    // Draw divider lines
+    if (cfgLayout >= 2) {
+        hLine(0, 799, 239);
+        hLine(0, 799, 240);
+    }
+    if (cfgLayout >= 3) {
+        vLine(399, 0, 479);
+        vLine(400, 0, 479);
+    }
+}
+
+// Legacy wrapper for backward compatibility
+void renderChart() {
+    // For single-slot mode, populate scratch globals from slot 0
+    if (cfgLayout == 1 && slots[0].candleCount > 0) {
+        renderAllCharts();
+    } else {
+        renderAllCharts();
+    }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2479,10 +2793,10 @@ void showSplash() {
 
 void doRefreshCycle(bool fullRefresh) {
     // Diagnostics
-    Serial.printf("  Heap: %d free, %d min | WiFi: %s RSSI:%d | Fails: %d\n",
+    Serial.printf("  Heap: %d free, %d min | WiFi: %s RSSI:%d | Fails: %d | Layout: %d\n",
                   ESP.getFreeHeap(), ESP.getMinFreeHeap(),
                   (WiFi.status() == WL_CONNECTED) ? "OK" : "DOWN",
-                  WiFi.RSSI(), consecutiveFails);
+                  WiFi.RSSI(), consecutiveFails, cfgLayout);
 
     connectWiFi();
 
@@ -2492,9 +2806,18 @@ void doRefreshCycle(bool fullRefresh) {
         return;
     }
 
-    if (fetchCandles()) {
+    bool anySuccess = false;
+    int activeSlots = cfgLayout;
+    for (int i = 0; i < activeSlots; i++) {
+        if (fetchSlotCandles(i)) {
+            anySuccess = true;
+        }
+        server.handleClient();  // keep web UI responsive between fetches
+    }
+
+    if (anySuccess) {
         consecutiveFails = 0;
-        renderChart();
+        renderAllCharts();
         Serial.println("Pushing to display...");
         updateDisplay(fullRefresh);
         Serial.println("Display updated!");
@@ -2550,8 +2873,17 @@ void setup() {
     if (WiFi.status() == WL_CONNECTED) {
         syncTime();
 
-        if (fetchCandles()) {
-            renderChart();
+        bool anySuccess = false;
+        int activeSlots = cfgLayout;
+        for (int i = 0; i < activeSlots; i++) {
+            if (fetchSlotCandles(i)) {
+                anySuccess = true;
+            }
+            server.handleClient();
+        }
+
+        if (anySuccess) {
+            renderAllCharts();
             Serial.println("First run — full refresh...");
             memset(oldbuf, 0xFF, BUF_SIZE);
             updateDisplay(true);
