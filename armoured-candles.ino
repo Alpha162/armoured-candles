@@ -325,20 +325,6 @@ void drawChar(int x, int y, char c, int scale = 1) {
     }
 }
 
-void drawCharColor(int x, int y, char c, bool black, int scale = 1) {
-    if (c < 32 || c > 126) c = '?';
-    int idx = c - 32;
-    for (int col = 0; col < 5; col++) {
-        unsigned char line = pgm_read_byte(&font5x7[idx][col]);
-        for (int row = 0; row < 7; row++) {
-            if (line & (1 << row)) {
-                if (scale == 1) setPixel(x + col, y + row, black);
-                else fillRect(x + col * scale, y + row * scale, scale, scale, black);
-            }
-        }
-    }
-}
-
 void drawString(int x, int y, const char* str, int scale = 1) {
     int spacing = 6 * scale;
     while (*str) { drawChar(x, y, *str, scale); x += spacing; str++; }
@@ -347,11 +333,6 @@ void drawString(int x, int y, const char* str, int scale = 1) {
 void drawStringR(int x, int y, const char* str, int scale = 1) {
     int spacing = 6 * scale;
     drawString(x - strlen(str) * spacing, y, str, scale);
-}
-
-void drawStringColor(int x, int y, const char* str, bool black, int scale = 1) {
-    int spacing = 6 * scale;
-    while (*str) { drawCharColor(x, y, *str, black, scale); x += spacing; str++; }
 }
 
 void drawLine(int x0, int y0, int x1, int y1, bool dashed = false) {
@@ -951,7 +932,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         Auto-refreshes every 30s &bull; <a href="/api/display" target="_blank" style="color:var(--accent);text-decoration:none">Open full size</a>
       </div>
       <div style="margin-top:4px;font-size:0.7em;color:var(--text-dim);font-family:'JetBrains Mono',monospace">
-        Trend badges: ^ up, = level, v down &bull; pip boxes show confidence (1-3)
+        Trend blocks: left=down, middle=level, right=up &bull; pips show confidence (1-3)
       </div>
     </div>
   </div>
@@ -2615,43 +2596,21 @@ int trendConfidencePips(const ChartSlot& slot, TrendState state) {
     return constrain(score, 1, 3);
 }
 
-void drawTrendBadge(int x, int y, int w, int h, TrendState state, bool compact) {
-    if (w < 8 || h < 8) return;
-
-    drawRect(x, y, w, h);
-
-    if (state == TREND_DOWN) {
-        fillRect(x + 1, y + 1, w - 2, h - 2, true);
-    } else {
-        fillRect(x + 1, y + 1, w - 2, h - 2, false);
-        for (int py = y + 1; py <= y + h - 2; py++) {
-            for (int px = x + 1; px <= x + w - 2; px++) {
-                bool on = (state == TREND_UP) ? (((px + py) % 5) == 0)
-                                              : ((px % 3 == 0) && (py % 3 == 0));
-                if (on) setPixel(px, py, true);
-            }
-        }
+void drawTrendBlocks(int x, int y, int blockW, int blockH, int gap, TrendState state) {
+    for (int i = 0; i < 3; i++) {
+        int bx = x + i * (blockW + gap);
+        bool active = (state == TREND_DOWN && i == 0) || (state == TREND_FLAT && i == 1) || (state == TREND_UP && i == 2);
+        drawRect(bx, y, blockW, blockH);
+        if (active) fillRect(bx + 1, y + 1, blockW - 2, blockH - 2, true);
     }
-
-    const char* txt = "=";
-    if (state == TREND_UP) txt = compact ? "^" : "^ UP";
-    else if (state == TREND_DOWN) txt = compact ? "v" : "v DN";
-    else txt = compact ? "=" : "= LVL";
-
-    int scale = 1;
-    int txtW = (int)strlen(txt) * 6 * scale;
-    int tx = x + (w - txtW) / 2;
-    int ty = y + (h - 7 * scale) / 2;
-    bool textBlack = (state != TREND_DOWN);
-    drawStringColor(tx, ty, txt, textBlack, scale);
 }
 
-void drawTrendPips(int x, int y, int count, int filled) {
+void drawTrendPips(int x, int y, int count, int filled, int pipSize = 4, int gap = 2) {
     filled = constrain(filled, 0, count);
     for (int i = 0; i < count; i++) {
-        int px = x + i * 6;
-        if (i < filled) fillRect(px, y, 4, 4, true);
-        else drawRect(px, y, 4, 4);
+        int px = x + i * (pipSize + gap);
+        if (i < filled) fillRect(px, y, pipSize, pipSize, true);
+        else drawRect(px, y, pipSize, pipSize);
     }
 }
 
@@ -2745,25 +2704,27 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
 
     TrendState trend = classifyTrend(slot);
     int trendPips = trendConfidencePips(slot, trend);
-    bool compactTrend = (vp.w < 500);
-    int badgeW = compactTrend ? 14 : 40;
-    int badgeH = compactTrend ? 10 : 12;
-    int badgeY = vp.y + (isFullScreen ? 7 : 4);
-    int priceW = strlen(priceStr) * 6 * priceScale;
-    int pipsW = compactTrend ? 0 : 20;
-    int badgeX = vp.x + vp.w - 4 - priceW - 8 - badgeW - pipsW;
-    if (badgeX > vp.x + mL + 4) {
-        drawTrendBadge(badgeX, badgeY, badgeW, badgeH, trend, compactTrend);
-        if (!compactTrend) drawTrendPips(badgeX + badgeW + 4, badgeY + 4, 3, trendPips);
+
+    int blockW = (vp.w < 500) ? 8 : (isFullScreen ? 12 : 10);
+    int blockH = (vp.w < 500) ? 7 : (isFullScreen ? 10 : 9);
+    int blockGap = 2;
+    int blocksW = blockW * 3 + blockGap * 2;
+    int blocksX = vp.x + vp.w - 4 - blocksW;
+    int blocksY = vp.y + (isFullScreen ? 3 : 2);
+    drawTrendBlocks(blocksX, blocksY, blockW, blockH, blockGap, trend);
+
+    if (vp.w >= 500) {
+        drawTrendPips(blocksX, blocksY + blockH + 2, 3, trendPips, 3, 2);
     }
 
-    drawStringR(vp.x + vp.w - 4, vp.y + (isFullScreen ? 3 : 3), priceStr, priceScale);
+    int priceRight = blocksX - 4;
+    drawStringR(priceRight, vp.y + (isFullScreen ? 3 : 3), priceStr, priceScale);
 
     // IP address — only in full-screen single chart mode
     if (isFullScreen) {
         char ipStr[32];
         snprintf(ipStr, sizeof(ipStr), "%s", WiFi.localIP().toString().c_str());
-        drawStringR(vp.x + vp.w - 10, vp.y + 22, ipStr, 1);
+        drawStringR(priceRight - 6, vp.y + 22, ipStr, 1);
     }
 
     hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
