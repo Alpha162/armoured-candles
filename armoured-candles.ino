@@ -765,6 +765,8 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   }
   .pill.live{border-color:var(--green);color:var(--green);background:var(--green-dim)}
   .pill.warn{border-color:var(--amber);color:var(--amber)}
+  .pill.neg{border-color:var(--red);color:var(--red);background:var(--red-dim)}
+  .pill.neutral{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
 
   .container{max-width:640px;margin:0 auto;padding:16px 16px 100px}
 
@@ -912,8 +914,9 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   <div class="status-pills">
     <div class="pill live" id="pillWifi">WiFi</div>
     <div class="pill" id="pillIp">--</div>
-    <div class="pill" id="pillPrice">--</div>
+    <div class="pill" id="pillCrypto">Crypto --</div>
     <div class="pill" id="pillUptime">--</div>
+    <div class="pill" id="pillMem">Mem --</div>
   </div>
 </div>
 
@@ -1299,6 +1302,43 @@ function toast(msg, err) {
   setTimeout(function(){t.className='toast';}, 2500);
 }
 
+function getActiveSlotSummary(slots, layout) {
+  var active = Math.max(1, Math.min(MAX_SLOTS, parseInt(layout || 1)));
+  var up = 0, down = 0, flat = 0, tracked = 0;
+  for (var i = 0; i < active; i++) {
+    var slot = slots[i] || {};
+    var pct = Number(slot.pctChange);
+    if (!isFinite(pct)) continue;
+    tracked++;
+    if (pct > 0.05) up++;
+    else if (pct < -0.05) down++;
+    else flat++;
+  }
+  return {active:active, tracked:tracked, up:up, down:down, flat:flat};
+}
+
+function setCryptoPill(slots, layout) {
+  var summary = getActiveSlotSummary(slots || [], layout);
+  var text = 'Crypto ' + summary.tracked + '/' + summary.active + ' • ▲' + summary.up + ' ▼' + summary.down;
+  if (summary.flat > 0) text += ' ▬' + summary.flat;
+  var cls = 'pill';
+  if (summary.tracked === 0) cls += ' warn';
+  else if (summary.down > summary.up) cls += ' neg';
+  else if (summary.up > summary.down) cls += ' live';
+  else cls += ' neutral';
+  el('pillCrypto').textContent = text;
+  el('pillCrypto').className = cls;
+}
+
+function setMemoryPill(heapBytes) {
+  var kb = Math.round((Number(heapBytes) || 0) / 1024);
+  var cls = 'pill';
+  if (kb > 0 && kb < 120) cls += ' warn';
+  else if (kb >= 120) cls += ' live';
+  el('pillMem').textContent = kb > 0 ? ('Mem ' + kb + 'KB') : 'Mem --';
+  el('pillMem').className = cls;
+}
+
 let configLoaded = false;
 async function loadConfig() {
   try {
@@ -1346,17 +1386,19 @@ async function loadConfig() {
     if (d.apMode) { el('pillWifi').textContent='AP Mode'; el('pillWifi').className='pill warn'; }
     else if (d.rssi) { el('pillWifi').textContent='WiFi '+d.rssi+'dBm'; el('pillWifi').className='pill live'; }
 
-    // Price pill from slot 0
-    var s0 = slots[0] || {};
-    if (s0.price > 0) {
-      var sign = s0.pctChange >= 0 ? '+' : '';
-      el('pillPrice').textContent = s0.coin+' $'+s0.price.toFixed(2)+' '+sign+s0.pctChange.toFixed(2)+'%';
-      el('pillPrice').className = 'pill ' + (s0.pctChange >= 0 ? 'live' : 'warn');
+    // Active panel crypto + runtime + memory pills
+    setCryptoPill(slots, d.layout);
+
+    var uptimeTxt = d.uptime || '--';
+    if (d.fails > 0) {
+      uptimeTxt += ' | ' + d.fails + ' fails';
+      el('pillUptime').className='pill warn';
+    } else {
+      el('pillUptime').className='pill';
     }
-    if (d.uptime) el('pillUptime').textContent = d.uptime;
-    if (d.heap) el('pillUptime').textContent += ' | '+Math.round(d.heap/1024)+'KB';
-    if (d.fails > 0) { el('pillUptime').textContent += ' | '+d.fails+' fails'; el('pillUptime').className='pill warn'; }
-    else el('pillUptime').className='pill';
+    el('pillUptime').textContent = uptimeTxt;
+
+    setMemoryPill(d.heap);
 
     if (!configLoaded) {
       configLoaded = true;
