@@ -10,19 +10,22 @@ The firmware fetches OHLCV data, renders candles + indicators into a 1-bit frame
 
 Compared to early versions, the project now includes:
 
+- **Multi-panel layouts (1 / 2 / 3 / 4 charts)** rendered on a single 800×480 display
+- **Per-panel chart configuration** (exchange, pair, interval, indicators, HA mode)
 - **Multi-exchange data support**: Hyperliquid, Binance, AsterDEX, Kraken, and Poloniex
 - **Searchable coin picker** with exchange-specific pair loading
-- **Heikin Ashi mode** toggle
 - **Live display preview** in the web UI (`/api/display` bitmap stream)
 - **Browser OTA firmware updates** (`/api/update`)
+- **Optional HTTP Basic Auth** for UI/API protection
 - **Improved WiFi recovery** with STA reconnect, ghost-link resets, and AP fallback
 
 ## Features
 
 - **Candlestick charts on e-paper** with OHLCV overlays
-- **Indicators**: EMA fast/slow, RSI, and volume bars
+- **Panel layouts**: 1, 2, 3, or 4 charts simultaneously
+- **Indicators** per panel: EMA fast/slow, RSI, and volume bars
 - **Exchange-aware intervals** with auto candle count scaling
-- **Heikin Ashi rendering** (optional)
+- **Heikin Ashi rendering** (optional per panel)
 - **Web config UI** at `http://epdchart.local` (or device IP)
 - **Persistent settings** in ESP32 NVS flash
 - **Partial/full refresh strategy** to balance ghosting vs. speed
@@ -81,24 +84,42 @@ Open: `http://epdchart.local` (or the local IP)
 - **Display Preview**
   - Live image from `/api/display`
   - Auto refreshes in the browser
-- **Chart**
-  - Exchange, coin search/select, interval
+- **Layout**
+  - Select 1, 2, 3, or 4 chart panels
+  - Inactive slots are automatically dimmed in the editor
+- **Chart Panels (per slot)**
+  - Exchange, quote asset, coin search/select, interval
   - Auto/manual candle count
   - Heikin Ashi toggle
+- **Global Settings**
   - Refresh interval
-- **Indicators**
-  - EMA fast/slow
-  - RSI period
-- **Display**
   - Full refresh cadence
   - Partial refresh threshold
   - Timezone offset
 - **WiFi**
   - SSID/password updates
+- **Authentication**
+  - Optional username/password for HTTP Basic Auth
 - **Firmware Update**
   - Upload compiled `.bin` and install OTA
 - **Actions**
   - Save config, force refresh, reboot
+
+## Panel Gallery
+
+Examples of panel layouts in action on the e-paper display:
+
+### Single panel
+
+![Single panel chart layout](docs/panel_single.svg)
+
+### Two-panel split
+
+![Dual panel chart layout](docs/panel_dual.svg)
+
+### Four-panel grid
+
+![Four panel chart layout](docs/panel_quad.svg)
 
 ## Supported Exchanges
 
@@ -108,7 +129,7 @@ Open: `http://epdchart.local` (or the local IP)
 - Kraken
 - Poloniex
 
-The UI fetches tradable pairs per exchange directly in the browser, then stores the selected base coin symbol in device config.
+The UI fetches tradable pairs per exchange directly in the browser, then stores each slot's selected pair in device config.
 
 ## Interval Support
 
@@ -124,18 +145,27 @@ Stored in NVS (`Preferences` namespace `epdchart`):
 
 | Setting | Default | Range/Notes |
 |---------|---------|-------------|
-| Exchange | `hyperliquid` | one of supported exchanges |
-| Coin | `ETH` | exchange-dependent |
-| Interval | `5m` | exchange-dependent |
-| Auto candles | `true` | auto map by interval |
-| Manual candles | `60` | 5–200 |
+| Layout | `1` | 1–4 panels |
 | Refresh | `5` min | 1–60 |
-| EMA fast | `9` | 2–100 |
-| EMA slow | `21` | 2–200 |
-| RSI period | `14` | 2–100 |
 | Timezone offset | `0` sec | UTC offset |
 | Full refresh every | `10` cycles | 1–50 |
 | Partial threshold | `40%` | 10–100 |
+| UI username | empty | optional (Basic Auth) |
+| UI password | empty | optional (Basic Auth) |
+
+Per-panel defaults:
+
+| Setting | Default | Range/Notes |
+|---------|---------|-------------|
+| Exchange | `hyperliquid` | one of supported exchanges |
+| Coin | `ETH` | exchange-dependent |
+| Quote | `USDT` | exchange-dependent |
+| Interval | `5m` | exchange-dependent |
+| Auto candles | `true` | auto map by interval |
+| Manual candles | `60` | 5–200 |
+| EMA fast | `9` | 2–100 |
+| EMA slow | `21` | 2–200 |
+| RSI period | `14` | 2–100 |
 | Heikin Ashi | `false` | on/off |
 
 ## Auto Candle Map
@@ -173,18 +203,24 @@ Stored in NVS (`Preferences` namespace `epdchart`):
 - `POST /api/refresh` — force redraw/update
 - `POST /api/restart` — reboot device
 - `GET /api/display` — current framebuffer as BMP
-- `POST /api/update` — OTA firmware upload
+- `POST /api/update/arm` — arm OTA upload mode
+- `POST /api/update` — OTA firmware upload stream
+
+> When UI auth is enabled, endpoints require HTTP Basic Auth.
 
 ## Project Structure
 
 ```text
 armoured-candles/
-├── armoured-candles.ino  # Main firmware: UI, WiFi, APIs, chart + indicators
+├── armoured-candles.ino  # Main firmware: UI, WiFi, APIs, charts + indicators
 ├── epd7in5_V2.cpp/.h     # Waveshare 7.5" V2 driver (full + partial refresh)
 ├── epdif.cpp/.h          # Low-level SPI transport glue
 ├── splash_image.h        # Boot splash bitmap
 └── docs/
-    └── splash_preview.png
+    ├── splash_preview.png
+    ├── panel_single.svg
+    ├── panel_dual.svg
+    └── panel_quad.svg
 ```
 
 ## Known Notes
