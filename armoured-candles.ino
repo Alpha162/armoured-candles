@@ -29,6 +29,7 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Update.h>
+#include <ctype.h>
 #include "epd7in5_V2.h"
 #include "splash_image.h"
 
@@ -58,6 +59,7 @@ char     cfgSSID[64]      = "YOUR_SSID";
 char     cfgPass[64]      = "YOUR_PASSWORD";
 char     cfgExchange[16]  = "hyperliquid";
 char     cfgCoin[16]      = "ETH";
+char     cfgQuote[8]      = "USDT";
 char     cfgInterval[8]   = "5m";
 int      cfgNumCandles    = 60;
 bool     cfgAutoCandles   = true;
@@ -69,6 +71,8 @@ int      cfgTzOffset      = 0;        // seconds from UTC
 int      cfgFullRefEvery  = 10;
 int      cfgPartialPct    = 40;       // 0-100
 bool     cfgHeikinAshi    = false;
+char     cfgUiUser[24]    = "";
+char     cfgUiPass[32]    = "";
 const char* NTP_SERVER    = "pool.ntp.org";
 const char* MDNS_HOST     = "epdchart";
 
@@ -117,6 +121,7 @@ void startAPMode();
 void setupWebServer();
 void renderOtaProgressScreen(int pct, bool failed);
 void updateOtaDisplay(bool forceFullRefresh);
+bool authenticateRequest();
 
 // ═══════════════════════════════════════════════════════
 // 5x7 FONT
@@ -438,17 +443,76 @@ void poloniexInterval(const char* iv, char* out, int outLen) {
 }
 
 // ═══════════════════════════════════════════════════════
-// NVS PERSISTENCE
+// CONFIG HELPERS + NVS PERSISTENCE
 // ═══════════════════════════════════════════════════════
+
+void copyBounded(char* dst, size_t dstSize, const char* src) {
+    if (!dst || dstSize == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    strncpy(dst, src, dstSize - 1);
+    dst[dstSize - 1] = '\0';
+}
+
+void toUpperInPlace(char* s) {
+    if (!s) return;
+    for (size_t i = 0; s[i] != '\0'; i++) s[i] = toupper((unsigned char)s[i]);
+}
+
+bool isValidExchange(const char* s) {
+    return s && (strcmp(s, "hyperliquid") == 0 || strcmp(s, "binance") == 0 ||
+                 strcmp(s, "asterdex") == 0 || strcmp(s, "kraken") == 0 ||
+                 strcmp(s, "poloniex") == 0);
+}
+
+bool isValidInterval(const char* s) {
+    static const char* allowed[] = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w","1M"};
+    if (!s) return false;
+    for (size_t i = 0; i < sizeof(allowed)/sizeof(allowed[0]); i++) {
+        if (strcmp(s, allowed[i]) == 0) return true;
+    }
+    return false;
+}
+
+bool isValidSymbolToken(const char* s, size_t maxLen) {
+    if (!s) return false;
+    size_t n = strlen(s);
+    if (n < 2 || n >= maxLen) return false;
+    for (size_t i = 0; i < n; i++) {
+        if (!isalnum((unsigned char)s[i])) return false;
+    }
+    return true;
+}
+
+bool authEnabled() {
+    return cfgUiUser[0] != '\0' && cfgUiPass[0] != '\0';
+}
+
+bool authenticateRequest() {
+    if (!authEnabled()) return true;
+    if (server.authenticate(cfgUiUser, cfgUiPass)) return true;
+    server.requestAuthentication(BASIC_AUTH, "EPD Chart", "Authentication required");
+    return false;
+}
 
 void loadConfig() {
     prefs.begin("epdchart", true);  // read-only
     String s;
-    s = prefs.getString("ssid", cfgSSID);       strncpy(cfgSSID, s.c_str(), sizeof(cfgSSID) - 1);
-    s = prefs.getString("pass", cfgPass);        strncpy(cfgPass, s.c_str(), sizeof(cfgPass) - 1);
-    s = prefs.getString("exchange", cfgExchange);  strncpy(cfgExchange, s.c_str(), sizeof(cfgExchange) - 1);
-    s = prefs.getString("coin", cfgCoin);        strncpy(cfgCoin, s.c_str(), sizeof(cfgCoin) - 1);
-    s = prefs.getString("interval", cfgInterval);strncpy(cfgInterval, s.c_str(), sizeof(cfgInterval) - 1);
+    s = prefs.getString("ssid", cfgSSID);        copyBounded(cfgSSID, sizeof(cfgSSID), s.c_str());
+    s = prefs.getString("pass", cfgPass);        copyBounded(cfgPass, sizeof(cfgPass), s.c_str());
+    s = prefs.getString("exchange", cfgExchange);copyBounded(cfgExchange, sizeof(cfgExchange), s.c_str());
+    s = prefs.getString("coin", cfgCoin);        copyBounded(cfgCoin, sizeof(cfgCoin), s.c_str());
+    s = prefs.getString("quote", cfgQuote);      copyBounded(cfgQuote, sizeof(cfgQuote), s.c_str());
+    s = prefs.getString("interval", cfgInterval);copyBounded(cfgInterval, sizeof(cfgInterval), s.c_str());
+    s = prefs.getString("uiUser", cfgUiUser);    copyBounded(cfgUiUser, sizeof(cfgUiUser), s.c_str());
+    s = prefs.getString("uiPass", cfgUiPass);    copyBounded(cfgUiPass, sizeof(cfgUiPass), s.c_str());
+
+    toUpperInPlace(cfgCoin);
+    toUpperInPlace(cfgQuote);
+    if (!isValidExchange(cfgExchange)) copyBounded(cfgExchange, sizeof(cfgExchange), "hyperliquid");
+    if (!isValidInterval(cfgInterval)) copyBounded(cfgInterval, sizeof(cfgInterval), "5m");
+    if (!isValidSymbolToken(cfgCoin, sizeof(cfgCoin))) copyBounded(cfgCoin, sizeof(cfgCoin), "ETH");
+    if (!isValidSymbolToken(cfgQuote, sizeof(cfgQuote))) copyBounded(cfgQuote, sizeof(cfgQuote), "USDT");
+
     cfgNumCandles   = prefs.getInt("numCandles", cfgNumCandles);
     cfgAutoCandles  = prefs.getBool("autoCandl", cfgAutoCandles);
     cfgRefreshMin   = prefs.getInt("refreshMin", cfgRefreshMin);
@@ -460,7 +524,7 @@ void loadConfig() {
     cfgPartialPct   = prefs.getInt("partialPct", cfgPartialPct);
     cfgHeikinAshi   = prefs.getBool("heikinAshi", cfgHeikinAshi);
     prefs.end();
-    Serial.println("Config loaded from NVS");
+    Serial.printf("Config loaded from NVS (auth:%s)\n", authEnabled() ? "on" : "off");
 }
 
 void saveConfig() {
@@ -469,7 +533,10 @@ void saveConfig() {
     prefs.putString("pass", cfgPass);
     prefs.putString("exchange", cfgExchange);
     prefs.putString("coin", cfgCoin);
+    prefs.putString("quote", cfgQuote);
     prefs.putString("interval", cfgInterval);
+    prefs.putString("uiUser", cfgUiUser);
+    prefs.putString("uiPass", cfgUiPass);
     prefs.putInt("numCandles", cfgNumCandles);
     prefs.putBool("autoCandl", cfgAutoCandles);
     prefs.putInt("refreshMin", cfgRefreshMin);
@@ -693,6 +760,10 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
           </div>
         </div>
         <div class="field">
+          <label>Quote</label>
+          <select id="quote"></select>
+        </div>
+        <div class="field">
           <label>Interval</label>
           <select id="interval"></select>
         </div>
@@ -790,6 +861,16 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         <input type="password" id="wifipass" placeholder="Network password">
         <div class="hint">WiFi changes take effect after reboot</div>
       </div>
+      <div class="row">
+        <div class="field">
+          <label>UI Username (optional)</label>
+          <input type="text" id="uiUser" placeholder="admin">
+        </div>
+        <div class="field">
+          <label>UI Password (optional)</label>
+          <input type="password" id="uiPass" placeholder="Set to enable API auth">
+        </div>
+      </div>
     </div>
   </div>
 
@@ -855,6 +936,38 @@ const EX_INTERVALS = {
 let coinList = [];
 let coinCache = {};
 let hlIdx = -1;
+let authHeader = '';
+
+function setAuthHeader() {
+  const u = (document.getElementById('uiUser').value || '').trim();
+  const p = document.getElementById('uiPass').value || '';
+  authHeader = (u && p) ? ('Basic ' + btoa(u + ':' + p)) : '';
+}
+
+function authFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = opts.headers || {};
+  if (authHeader) opts.headers['Authorization'] = authHeader;
+  return fetch(url, opts);
+}
+
+function rebuildQuoteOptions(ex, currentQuote) {
+  const defaults = {
+    hyperliquid:['USDC'],
+    binance:['USDT','BUSD','USDC'],
+    asterdex:['USDT'],
+    kraken:['USD','USDT','EUR'],
+    poloniex:['USDT','USDC']
+  };
+  const sel = document.getElementById('quote');
+  const qs = defaults[ex] || ['USDT'];
+  sel.innerHTML = '';
+  qs.forEach(function(v){
+    const o = document.createElement('option');
+    o.value = v; o.textContent = v; sel.appendChild(o);
+  });
+  sel.value = qs.indexOf(currentQuote) >= 0 ? currentQuote : qs[0];
+}
 
 function fmtSpan(iv, n) {
   const totalMin = (IV_MINS[iv]||5) * n;
@@ -875,7 +988,6 @@ function updateAutoInfo() {
   if (isAuto) document.getElementById('numCandles').value = n;
 }
 
-// ── Interval dropdown rebuild per exchange ──
 function rebuildIntervals(ex, currentIv) {
   const sel = document.getElementById('interval');
   const ivs = EX_INTERVALS[ex] || EX_INTERVALS.hyperliquid;
@@ -890,9 +1002,10 @@ function rebuildIntervals(ex, currentIv) {
   updateAutoInfo();
 }
 
-// ── Coin dropdown: fetch pairs from exchange API (client-side) ──
 async function fetchPairs(ex) {
-  if (coinCache[ex]) { coinList = coinCache[ex]; return; }
+  const quote = (document.getElementById('quote').value || 'USDT').toUpperCase();
+  const cacheKey = ex + ':' + quote;
+  if (coinCache[cacheKey]) { coinList = coinCache[cacheKey]; return; }
   const dd = document.getElementById('coinDropdown');
   dd.innerHTML = '<div class="coin-loading">Loading pairs...</div>';
   dd.classList.add('open');
@@ -904,16 +1017,18 @@ async function fetchPairs(ex) {
         body:'{"type":"meta"}'
       });
       const d = await r.json();
-      list = (d.universe||[]).map(function(x){return x.name;});
+      list = (d.universe||[])
+        .filter(function(x){ return (x.quoteToken || 'USDC') === quote; })
+        .map(function(x){return x.name;});
     } else if (ex === 'binance') {
       const r = await fetch('https://api.binance.com/api/v3/exchangeInfo');
       const d = await r.json();
-      list = (d.symbols||[]).filter(function(s){return s.quoteAsset==='USDT'&&s.status==='TRADING';})
+      list = (d.symbols||[]).filter(function(s){return s.quoteAsset===quote&&s.status==='TRADING';})
         .map(function(s){return s.baseAsset;});
     } else if (ex === 'asterdex') {
       const r = await fetch('https://fapi.asterdex.com/fapi/v3/exchangeInfo');
       const d = await r.json();
-      list = (d.symbols||[]).filter(function(s){return s.quoteAsset==='USDT'&&s.status==='TRADING';})
+      list = (d.symbols||[]).filter(function(s){return s.quoteAsset===quote&&s.status==='TRADING';})
         .map(function(s){return s.baseAsset;});
     } else if (ex === 'kraken') {
       const r = await fetch('https://api.kraken.com/0/public/AssetPairs');
@@ -923,7 +1038,7 @@ async function fetchPairs(ex) {
       Object.keys(pairs).forEach(function(k){
         const p = pairs[k];
         const q = (p.quote||'').replace(/^Z/,'');
-        if (q==='USD'||q==='USDT') {
+        if (q===quote) {
           const b = (p.base||'').replace(/^X/,'');
           if (!seen[b]) { seen[b]=1; list.push(b); }
         }
@@ -931,13 +1046,12 @@ async function fetchPairs(ex) {
     } else if (ex === 'poloniex') {
       const r = await fetch('https://api.poloniex.com/markets');
       const d = await r.json();
-      list = d.filter(function(m){return m.symbol&&m.symbol.endsWith('_USDT');})
+      list = d.filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);})
         .map(function(m){return m.symbol.split('_')[0];});
     }
     list.sort();
-    // deduplicate
     list = list.filter(function(v,i,a){return i===0||v!==a[i-1];});
-    coinCache[ex] = list;
+    coinCache[cacheKey] = list;
     coinList = list;
   } catch(e) {
     console.error('Failed to fetch pairs:', e);
@@ -968,25 +1082,18 @@ function selectCoin(name) {
   document.getElementById('coinDropdown').classList.remove('open');
 }
 
-// Coin search input events
 const coinSearchEl = document.getElementById('coinSearch');
 const coinDdEl = document.getElementById('coinDropdown');
 
-coinSearchEl.addEventListener('focus', function() {
-  renderCoinDropdown(coinSearchEl.value);
-});
-coinSearchEl.addEventListener('input', function() {
-  renderCoinDropdown(coinSearchEl.value);
-});
+coinSearchEl.addEventListener('focus', function() { renderCoinDropdown(coinSearchEl.value); });
+coinSearchEl.addEventListener('input', function() { renderCoinDropdown(coinSearchEl.value); });
 coinSearchEl.addEventListener('keydown', function(e) {
   const items = coinDdEl.querySelectorAll('.coin-item');
   if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    hlIdx = Math.min(hlIdx+1, items.length-1);
+    e.preventDefault(); hlIdx = Math.min(hlIdx+1, items.length-1);
     items.forEach(function(el,i){el.classList.toggle('hl',i===hlIdx);});
   } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    hlIdx = Math.max(hlIdx-1, 0);
+    e.preventDefault(); hlIdx = Math.max(hlIdx-1, 0);
     items.forEach(function(el,i){el.classList.toggle('hl',i===hlIdx);});
   } else if (e.key === 'Enter') {
     e.preventDefault();
@@ -1002,17 +1109,22 @@ coinDdEl.addEventListener('click', function(e) {
   if (item) selectCoin(item.dataset.coin);
 });
 
-// Close dropdown on outside click
 document.addEventListener('click', function(e) {
   if (!e.target.closest('.coin-wrap')) coinDdEl.classList.remove('open');
 });
 
-// Exchange change handler
 document.getElementById('exchange').addEventListener('change', async function() {
   const ex = this.value;
   rebuildIntervals(ex, document.getElementById('interval').value);
+  rebuildQuoteOptions(ex, document.getElementById('quote').value);
   await fetchPairs(ex);
-  // Clear coin selection when switching exchange
+  document.getElementById('coin').value = '';
+  document.getElementById('coinSearch').value = '';
+  renderCoinDropdown('');
+});
+
+document.getElementById('quote').addEventListener('change', async function() {
+  await fetchPairs(document.getElementById('exchange').value);
   document.getElementById('coin').value = '';
   document.getElementById('coinSearch').value = '';
   renderCoinDropdown('');
@@ -1021,7 +1133,6 @@ document.getElementById('exchange').addEventListener('change', async function() 
 document.getElementById('interval').addEventListener('change', updateAutoInfo);
 document.getElementById('autoCandles').addEventListener('change', updateAutoInfo);
 document.getElementById('numCandles').addEventListener('input', updateAutoInfo);
-
 function toast(msg, err) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -1032,15 +1143,17 @@ function toast(msg, err) {
 let configLoaded = false;
 async function loadConfig() {
   try {
-    const r = await fetch('/api/status');
+    const r = await authFetch('/api/status');
     const d = await r.json();
 
     const ex = d.exchange || 'hyperliquid';
     document.getElementById('exchange').value = ex;
     rebuildIntervals(ex, d.interval || '5m');
 
+    rebuildQuoteOptions(ex, d.quote || 'USDT');
     document.getElementById('coin').value = d.coin || '';
     document.getElementById('coinSearch').value = d.coin || '';
+    document.getElementById('quote').value = d.quote || 'USDT';
     document.getElementById('autoCandles').checked = d.autoCandles;
     document.getElementById('numCandles').value = d.numCandles || 60;
     document.getElementById('refreshMin').value = d.refreshMin || 5;
@@ -1052,6 +1165,9 @@ async function loadConfig() {
     document.getElementById('partialPct').value = d.partialPct || 40;
     document.getElementById('heikinAshi').checked = d.heikinAshi || false;
     document.getElementById('ssid').value = d.ssid || '';
+    document.getElementById('uiUser').value = d.uiUser || '';
+    document.getElementById('uiPass').value = '';
+    setAuthHeader();
 
     document.getElementById('pillIp').textContent = d.apMode ? ('AP: ' + d.apIP) : d.ip;
     if (d.apMode) {
@@ -1089,6 +1205,7 @@ async function saveConfig() {
   const body = {
     exchange: document.getElementById('exchange').value,
     coin: document.getElementById('coin').value.toUpperCase().trim(),
+    quote: document.getElementById('quote').value.toUpperCase().trim(),
     interval: document.getElementById('interval').value,
     autoCandles: document.getElementById('autoCandles').checked,
     numCandles: parseInt(document.getElementById('numCandles').value) || 60,
@@ -1101,17 +1218,20 @@ async function saveConfig() {
     partialPct: parseInt(document.getElementById('partialPct').value) || 40,
     heikinAshi: document.getElementById('heikinAshi').checked,
     ssid: document.getElementById('ssid').value,
-    pass: document.getElementById('wifipass').value
+    pass: document.getElementById('wifipass').value,
+    uiUser: document.getElementById('uiUser').value.trim(),
+    uiPass: document.getElementById('uiPass').value
   };
+  setAuthHeader();
   try {
-    const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const r = await authFetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     if (r.ok) toast('Config saved'); else toast('Save failed', true);
   } catch(e) { toast('Connection error', true); }
 }
 
 async function refreshNow() {
   try {
-    await fetch('/api/refresh', {method:'POST'});
+    await authFetch('/api/refresh', {method:'POST'});
     toast('Display refresh triggered');
   } catch(e) { toast('Failed', true); }
 }
@@ -1119,7 +1239,7 @@ async function refreshNow() {
 async function rebootDevice() {
   if (!confirm('Reboot the device?')) return;
   try {
-    await fetch('/api/restart', {method:'POST'});
+    await authFetch('/api/restart', {method:'POST'});
     toast('Rebooting...');
   } catch(e) { toast('Rebooting...'); }
 }
@@ -1154,7 +1274,7 @@ async function armFirmwareUpdateScreen() {
   if (firmwareUnlockPending || firmwareUnlocked) return;
   firmwareUnlockPending = true;
   try {
-    const r = await fetch('/api/update/arm', {method:'POST'});
+    const r = await authFetch('/api/update/arm', {method:'POST'});
     if (!r.ok) throw new Error('arm failed');
     setFirmwareUnlocked(true);
     toast('Firmware update unlocked');
@@ -1206,7 +1326,7 @@ function uploadFirmware() {
   const startPoll = () => {
     pollTimer = setInterval(async () => {
       try {
-        const r = await fetch('/api/status');
+        const r = await authFetch('/api/status');
         if (!r.ok) return;
         const d = await r.json();
         if (typeof d.otaProgress === 'number') setPct(d.otaProgress);
@@ -1232,6 +1352,7 @@ function uploadFirmware() {
   };
 
   xhr.open('POST', '/api/update');
+  if (authHeader) xhr.setRequestHeader('Authorization', authHeader);
   startPoll();
   xhr.send(formData);
 }
@@ -1262,54 +1383,87 @@ void handleStatus() {
     char uptimeStr[16];
     snprintf(uptimeStr, sizeof(uptimeStr), "%dh %dm", uh, um);
 
-    String json = "{";
-    json += "\"exchange\":\"" + String(cfgExchange) + "\",";
-    json += "\"coin\":\"" + String(cfgCoin) + "\",";
-    json += "\"interval\":\"" + String(cfgInterval) + "\",";
-    json += "\"autoCandles\":" + String(cfgAutoCandles ? "true" : "false") + ",";
-    json += "\"numCandles\":" + String(nc) + ",";
-    json += "\"refreshMin\":" + String(cfgRefreshMin) + ",";
-    json += "\"emaFast\":" + String(cfgEmaFast) + ",";
-    json += "\"emaSlow\":" + String(cfgEmaSlow) + ",";
-    json += "\"rsiPeriod\":" + String(cfgRsiPeriod) + ",";
-    json += "\"tzOffset\":" + String(cfgTzOffset) + ",";
-    json += "\"fullRefEvery\":" + String(cfgFullRefEvery) + ",";
-    json += "\"partialPct\":" + String(cfgPartialPct) + ",";
-    json += "\"heikinAshi\":" + String(cfgHeikinAshi ? "true" : "false") + ",";
-    json += "\"ssid\":\"" + String(cfgSSID) + "\",";
-    json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-    json += "\"apMode\":" + String(apModeActive ? "true" : "false") + ",";
-    json += "\"apIP\":\"" + WiFi.softAPIP().toString() + "\",";
-    json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-    json += "\"price\":" + String(lastPrice, 2) + ",";
-    json += "\"pctChange\":" + String(lastPctChange, 2) + ",";
-    json += "\"timeSpan\":\"" + String(span) + "\",";
-    json += "\"uptime\":\"" + String(uptimeStr) + "\",";
-    json += "\"fails\":" + String(consecutiveFails) + ",";
-    json += "\"otaActive\":" + String(otaActive ? "true" : "false") + ",";
-    json += "\"otaProgress\":" + String(otaProgressPct) + ",";
-    json += "\"otaFailed\":" + String(otaFailed ? "true" : "false") + ",";
-    json += "\"heap\":" + String(ESP.getFreeHeap());
-    json += "}";
-    server.send(200, "application/json", json);
+    DynamicJsonDocument doc(1024);
+    doc["exchange"] = cfgExchange;
+    doc["coin"] = cfgCoin;
+    doc["quote"] = cfgQuote;
+    doc["interval"] = cfgInterval;
+    doc["autoCandles"] = cfgAutoCandles;
+    doc["numCandles"] = nc;
+    doc["refreshMin"] = cfgRefreshMin;
+    doc["emaFast"] = cfgEmaFast;
+    doc["emaSlow"] = cfgEmaSlow;
+    doc["rsiPeriod"] = cfgRsiPeriod;
+    doc["tzOffset"] = cfgTzOffset;
+    doc["fullRefEvery"] = cfgFullRefEvery;
+    doc["partialPct"] = cfgPartialPct;
+    doc["heikinAshi"] = cfgHeikinAshi;
+    bool canViewSensitive = !authEnabled() || server.authenticate(cfgUiUser, cfgUiPass);
+    doc["ssid"] = canViewSensitive ? cfgSSID : "";
+    doc["uiUser"] = canViewSensitive ? cfgUiUser : "";
+    doc["authEnabled"] = authEnabled();
+    doc["restricted"] = !canViewSensitive;
+    doc["ip"] = WiFi.localIP().toString();
+    doc["apMode"] = apModeActive;
+    doc["apIP"] = WiFi.softAPIP().toString();
+    doc["rssi"] = WiFi.RSSI();
+    doc["price"] = lastPrice;
+    doc["pctChange"] = lastPctChange;
+    doc["timeSpan"] = span;
+    doc["uptime"] = uptimeStr;
+    doc["fails"] = consecutiveFails;
+    doc["otaActive"] = otaActive;
+    doc["otaProgress"] = otaProgressPct;
+    doc["otaFailed"] = otaFailed;
+    doc["heap"] = ESP.getFreeHeap();
+
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
 }
 
 void handleConfigPost() {
+    if (!authenticateRequest()) return;
     if (!server.hasArg("plain")) {
         server.send(400, "application/json", "{\"error\":\"no body\"}");
         return;
     }
 
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(1536);
     DeserializationError err = deserializeJson(doc, server.arg("plain"));
     if (err) {
         server.send(400, "application/json", "{\"error\":\"bad json\"}");
         return;
     }
 
-    if (doc.containsKey("exchange"))    strncpy(cfgExchange, doc["exchange"].as<const char*>(), sizeof(cfgExchange) - 1);
-    if (doc.containsKey("coin"))        strncpy(cfgCoin, doc["coin"].as<const char*>(), sizeof(cfgCoin) - 1);
-    if (doc.containsKey("interval"))    strncpy(cfgInterval, doc["interval"].as<const char*>(), sizeof(cfgInterval) - 1);
+    char tmpExchange[sizeof(cfgExchange)];
+    char tmpCoin[sizeof(cfgCoin)];
+    char tmpQuote[sizeof(cfgQuote)];
+    char tmpInterval[sizeof(cfgInterval)];
+
+    copyBounded(tmpExchange, sizeof(tmpExchange), cfgExchange);
+    copyBounded(tmpCoin, sizeof(tmpCoin), cfgCoin);
+    copyBounded(tmpQuote, sizeof(tmpQuote), cfgQuote);
+    copyBounded(tmpInterval, sizeof(tmpInterval), cfgInterval);
+
+    if (doc.containsKey("exchange")) copyBounded(tmpExchange, sizeof(tmpExchange), doc["exchange"].as<const char*>());
+    if (doc.containsKey("coin"))     copyBounded(tmpCoin, sizeof(tmpCoin), doc["coin"].as<const char*>());
+    if (doc.containsKey("quote"))    copyBounded(tmpQuote, sizeof(tmpQuote), doc["quote"].as<const char*>());
+    if (doc.containsKey("interval")) copyBounded(tmpInterval, sizeof(tmpInterval), doc["interval"].as<const char*>());
+
+    toUpperInPlace(tmpCoin);
+    toUpperInPlace(tmpQuote);
+
+    if (!isValidExchange(tmpExchange)) { server.send(400, "application/json", "{\"error\":\"invalid exchange\"}"); return; }
+    if (!isValidInterval(tmpInterval)) { server.send(400, "application/json", "{\"error\":\"invalid interval\"}"); return; }
+    if (!isValidSymbolToken(tmpCoin, sizeof(tmpCoin))) { server.send(400, "application/json", "{\"error\":\"invalid coin\"}"); return; }
+    if (!isValidSymbolToken(tmpQuote, sizeof(tmpQuote))) { server.send(400, "application/json", "{\"error\":\"invalid quote\"}"); return; }
+
+    copyBounded(cfgExchange, sizeof(cfgExchange), tmpExchange);
+    copyBounded(cfgCoin, sizeof(cfgCoin), tmpCoin);
+    copyBounded(cfgQuote, sizeof(cfgQuote), tmpQuote);
+    copyBounded(cfgInterval, sizeof(cfgInterval), tmpInterval);
+
     if (doc.containsKey("autoCandles")) cfgAutoCandles  = doc["autoCandles"].as<bool>();
     if (doc.containsKey("numCandles"))  cfgNumCandles   = constrain(doc["numCandles"].as<int>(), 5, MAX_CANDLES);
     if (doc.containsKey("refreshMin"))  cfgRefreshMin   = constrain(doc["refreshMin"].as<int>(), 1, 60);
@@ -1319,28 +1473,36 @@ void handleConfigPost() {
     if (doc.containsKey("tzOffset"))    cfgTzOffset     = doc["tzOffset"].as<int>();
     if (doc.containsKey("fullRefEvery"))cfgFullRefEvery = constrain(doc["fullRefEvery"].as<int>(), 1, 50);
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
-    if (doc.containsKey("heikinAshi")) cfgHeikinAshi   = doc["heikinAshi"].as<bool>();
+    if (doc.containsKey("heikinAshi"))  cfgHeikinAshi   = doc["heikinAshi"].as<bool>();
 
-    // WiFi — only update if non-empty
     if (doc.containsKey("ssid") && strlen(doc["ssid"].as<const char*>()) > 0)
-        strncpy(cfgSSID, doc["ssid"].as<const char*>(), sizeof(cfgSSID) - 1);
+        copyBounded(cfgSSID, sizeof(cfgSSID), doc["ssid"].as<const char*>());
     if (doc.containsKey("pass") && strlen(doc["pass"].as<const char*>()) > 0)
-        strncpy(cfgPass, doc["pass"].as<const char*>(), sizeof(cfgPass) - 1);
+        copyBounded(cfgPass, sizeof(cfgPass), doc["pass"].as<const char*>());
+
+    if (doc.containsKey("uiUser")) {
+        copyBounded(cfgUiUser, sizeof(cfgUiUser), doc["uiUser"].as<const char*>());
+    }
+    if (doc.containsKey("uiPass")) {
+        copyBounded(cfgUiPass, sizeof(cfgUiPass), doc["uiPass"].as<const char*>());
+    }
 
     saveConfig();
-    configTime(cfgTzOffset, 0, NTP_SERVER);  // re-apply timezone
+    configTime(cfgTzOffset, 0, NTP_SERVER);
 
     server.send(200, "application/json", "{\"ok\":true}");
     Serial.println("Config updated via web UI");
 }
 
 void handleRefresh() {
+    if (!authenticateRequest()) return;
     forceRefresh = true;
     server.send(200, "application/json", "{\"ok\":true}");
     Serial.println("Refresh triggered via web UI");
 }
 
 void handleRestart() {
+    if (!authenticateRequest()) return;
     server.send(200, "application/json", "{\"ok\":true}");
     Serial.println("Reboot triggered via web UI");
     delay(500);
@@ -1393,6 +1555,7 @@ void handleDisplayBMP() {
 
 
 void handleUpdateArm() {
+    if (!authenticateRequest()) return;
     otaFailed = false;
     otaActive = false;
     otaProgressPct = 0;
@@ -1401,6 +1564,7 @@ void handleUpdateArm() {
 }
 
 void handleUpdateResult() {
+    if (!authenticateRequest()) return;
     server.sendHeader("Connection", "close");
     if (Update.hasError()) {
         otaFailed = true;
@@ -1430,6 +1594,7 @@ void handleUpdateResult() {
 
 
 void handleUpdateUpload() {
+    if (!authenticateRequest()) return;
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         Serial.printf("OTA update: %s\n", upload.filename.c_str());
@@ -1761,7 +1926,7 @@ bool fetchCandlesHyperliquid(int numCandles, uint64_t startMs, uint64_t nowMs) {
 // ── Binance-format (shared by Binance & AsterDEX) ───
 bool fetchCandlesBinanceFormat(const char* baseUrl, int numCandles, uint64_t startMs, uint64_t nowMs) {
     char symbol[32];
-    snprintf(symbol, sizeof(symbol), "%sUSDT", cfgCoin);
+    snprintf(symbol, sizeof(symbol), "%s%s", cfgCoin, cfgQuote);
 
     int requestCount = numCandles + 50;
     if (requestCount > 1000) requestCount = 1000;
@@ -1808,7 +1973,7 @@ bool fetchCandlesBinanceFormat(const char* baseUrl, int numCandles, uint64_t sta
 // ── Kraken ───────────────────────────────────────────
 bool fetchCandlesKraken(int numCandles, uint64_t startMs) {
     char pair[32];
-    snprintf(pair, sizeof(pair), "%sUSDT", cfgCoin);
+    snprintf(pair, sizeof(pair), "%s%s", cfgCoin, cfgQuote);
 
     char ivBuf[8];
     krakenInterval(cfgInterval, ivBuf, sizeof(ivBuf));
@@ -1871,7 +2036,7 @@ bool fetchCandlesKraken(int numCandles, uint64_t startMs) {
 // ── Poloniex ─────────────────────────────────────────
 bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     char symbol[32];
-    snprintf(symbol, sizeof(symbol), "%s_USDT", cfgCoin);
+    snprintf(symbol, sizeof(symbol), "%s_%s", cfgCoin, cfgQuote);
 
     char ivBuf[16];
     poloniexInterval(cfgInterval, ivBuf, sizeof(ivBuf));
@@ -1935,7 +2100,7 @@ bool fetchCandles() {
     int requestCount = numCandles + 50;
     uint64_t startMs = nowMs - (uint64_t)requestCount * ivMs;
 
-    Serial.printf("Exchange: %s  Coin: %s  Interval: %s\n", cfgExchange, cfgCoin, cfgInterval);
+    Serial.printf("Exchange: %s  Pair: %s/%s  Interval: %s\n", cfgExchange, cfgCoin, cfgQuote, cfgInterval);
 
     bool ok = false;
     if (strcmp(cfgExchange, "binance") == 0)
@@ -2145,7 +2310,7 @@ void renderChart() {
     else strncpy(exLabel, cfgExchange, sizeof(exLabel));
 
     char title[80];
-    snprintf(title, sizeof(title), "%s:%s/USDT  %s%s", exLabel, cfgCoin, cfgInterval,
+    snprintf(title, sizeof(title), "%s:%s/%s  %s%s", exLabel, cfgCoin, cfgQuote, cfgInterval,
              cfgHeikinAshi ? "  HA" : "");
     drawString(MARGIN_L, 5, title, 2);
 
