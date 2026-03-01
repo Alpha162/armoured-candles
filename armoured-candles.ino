@@ -68,6 +68,7 @@ int      cfgRsiPeriod     = 14;
 int      cfgTzOffset      = 0;        // seconds from UTC
 int      cfgFullRefEvery  = 10;
 int      cfgPartialPct    = 40;       // 0-100
+bool     cfgHeikinAshi    = false;
 const char* NTP_SERVER    = "pool.ntp.org";
 const char* MDNS_HOST     = "epdchart";
 
@@ -448,6 +449,7 @@ void loadConfig() {
     cfgTzOffset     = prefs.getInt("tzOffset", cfgTzOffset);
     cfgFullRefEvery = prefs.getInt("fullRefEv", cfgFullRefEvery);
     cfgPartialPct   = prefs.getInt("partialPct", cfgPartialPct);
+    cfgHeikinAshi   = prefs.getBool("heikinAshi", cfgHeikinAshi);
     prefs.end();
     Serial.println("Config loaded from NVS");
 }
@@ -468,6 +470,7 @@ void saveConfig() {
     prefs.putInt("tzOffset", cfgTzOffset);
     prefs.putInt("fullRefEv", cfgFullRefEvery);
     prefs.putInt("partialPct", cfgPartialPct);
+    prefs.putBool("heikinAshi", cfgHeikinAshi);
     prefs.end();
     Serial.println("Config saved to NVS");
 }
@@ -691,6 +694,11 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         <label class="toggle"><input type="checkbox" id="autoCandles" checked><span class="slider"></span></label>
       </div>
       <div id="autoInfo" class="auto-info"></div>
+
+      <div class="toggle-row" style="margin-top:8px">
+        <span class="label">Heikin Ashi candles</span>
+        <label class="toggle"><input type="checkbox" id="heikinAshi"><span class="slider"></span></label>
+      </div>
       <div class="field" id="manualCandleField" style="margin-top:10px;display:none">
         <label>Number of candles</label>
         <input type="number" id="numCandles" min="5" max="200" value="60">
@@ -1025,6 +1033,7 @@ async function loadConfig() {
     document.getElementById('tzOffset').value = String(d.tzOffset || 0);
     document.getElementById('fullRefEvery').value = d.fullRefEvery || 10;
     document.getElementById('partialPct').value = d.partialPct || 40;
+    document.getElementById('heikinAshi').checked = d.heikinAshi || false;
     document.getElementById('ssid').value = d.ssid || '';
 
     document.getElementById('pillIp').textContent = d.apMode ? ('AP: ' + d.apIP) : d.ip;
@@ -1073,6 +1082,7 @@ async function saveConfig() {
     tzOffset: parseInt(document.getElementById('tzOffset').value) || 0,
     fullRefEvery: parseInt(document.getElementById('fullRefEvery').value) || 10,
     partialPct: parseInt(document.getElementById('partialPct').value) || 40,
+    heikinAshi: document.getElementById('heikinAshi').checked,
     ssid: document.getElementById('ssid').value,
     pass: document.getElementById('wifipass').value
   };
@@ -1181,6 +1191,7 @@ void handleStatus() {
     json += "\"tzOffset\":" + String(cfgTzOffset) + ",";
     json += "\"fullRefEvery\":" + String(cfgFullRefEvery) + ",";
     json += "\"partialPct\":" + String(cfgPartialPct) + ",";
+    json += "\"heikinAshi\":" + String(cfgHeikinAshi ? "true" : "false") + ",";
     json += "\"ssid\":\"" + String(cfgSSID) + "\",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
     json += "\"apMode\":" + String(apModeActive ? "true" : "false") + ",";
@@ -1221,6 +1232,7 @@ void handleConfigPost() {
     if (doc.containsKey("tzOffset"))    cfgTzOffset     = doc["tzOffset"].as<int>();
     if (doc.containsKey("fullRefEvery"))cfgFullRefEvery = constrain(doc["fullRefEvery"].as<int>(), 1, 50);
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
+    if (doc.containsKey("heikinAshi")) cfgHeikinAshi   = doc["heikinAshi"].as<bool>();
 
     // WiFi — only update if non-empty
     if (doc.containsKey("ssid") && strlen(doc["ssid"].as<const char*>()) > 0)
@@ -1521,8 +1533,36 @@ void logHttpError(int httpCode) {
 }
 
 // ── Post-parse: calculate indicators & cache price ──
+// Convert standard OHLCV candles to Heikin Ashi in-place
+void applyHeikinAshi() {
+    if (candleCount < 1) return;
+    // First candle: HA open = (o+c)/2, HA close = (o+h+l+c)/4
+    float prevO = (candles[0].o + candles[0].c) / 2.0f;
+    float prevC = (candles[0].o + candles[0].h + candles[0].l + candles[0].c) / 4.0f;
+    candles[0].o = prevO;
+    candles[0].c = prevC;
+    candles[0].h = max(candles[0].h, max(prevO, prevC));
+    candles[0].l = min(candles[0].l, min(prevO, prevC));
+
+    for (int i = 1; i < candleCount; i++) {
+        float haC = (candles[i].o + candles[i].h + candles[i].l + candles[i].c) / 4.0f;
+        float haO = (prevO + prevC) / 2.0f;
+        float haH = max(candles[i].h, max(haO, haC));
+        float haL = min(candles[i].l, min(haO, haC));
+        candles[i].o = haO;
+        candles[i].c = haC;
+        candles[i].h = haH;
+        candles[i].l = haL;
+        // volume stays unchanged
+        prevO = haO;
+        prevC = haC;
+    }
+    Serial.println("Heikin Ashi applied");
+}
+
 void finalizeCandleData() {
     Serial.printf("Parsed %d candles\n", candleCount);
+    if (cfgHeikinAshi) applyHeikinAshi();
     calcEMA(emaFast, cfgEmaFast);
     calcEMA(emaSlow, cfgEmaSlow);
     calcRSI();
@@ -1870,7 +1910,8 @@ void renderChart() {
     else strncpy(exLabel, cfgExchange, sizeof(exLabel));
 
     char title[80];
-    snprintf(title, sizeof(title), "%s:%s/USDT  %s", exLabel, cfgCoin, cfgInterval);
+    snprintf(title, sizeof(title), "%s:%s/USDT  %s%s", exLabel, cfgCoin, cfgInterval,
+             cfgHeikinAshi ? "  HA" : "");
     drawString(MARGIN_L, 5, title, 2);
 
     char legend[48];
