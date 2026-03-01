@@ -1864,21 +1864,26 @@ void showWifiFailScreen() {
     renderStatusScreen("WIFI DISCONNECTED", l1, l2, l3, l4);
 }
 
-int choosePriceLabelDecimals(float priceStep) {
-    // Keep formatting lightweight: derive decimals directly from tick step size.
-    // Example: step 0.01 -> 2 decimals, step 0.0005 -> 4 decimals.
-    float normalizedStep = fabsf(priceStep);
-    if (normalizedStep < 1e-9f) return 2;
-
-    int decimals = 0;
-    while (normalizedStep < 1.0f && decimals < 6) {
-        normalizedStep *= 10.0f;
-        decimals++;
+int choosePriceLabelDecimals(float priceLo, float priceRange) {
+    float step = priceRange / 5.0f;
+    for (int decimals = 2; decimals <= 6; decimals++) {
+        float scale = powf(10.0f, (float)decimals);
+        long prev = 0;
+        bool hasPrev = false;
+        bool distinct = true;
+        for (int g = 0; g <= 5; g++) {
+            float price = priceLo + step * g;
+            long rounded = lroundf(price * scale);
+            if (hasPrev && rounded == prev) {
+                distinct = false;
+                break;
+            }
+            prev = rounded;
+            hasPrev = true;
+        }
+        if (distinct) return decimals;
     }
-
-    // Keep at least 2 decimals for consistency with larger-priced pairs.
-    if (decimals < 2) decimals = 2;
-    return decimals;
+    return 6;
 }
 
 void renderChart() {
@@ -1949,8 +1954,7 @@ void renderChart() {
     hLine(0, SCR_W - 1, MARGIN_T - 2);
 
     // ── Price grid ──
-    float priceStep = priceRange / 5.0f;
-    int priceLabelDecimals = choosePriceLabelDecimals(priceStep);
+    int priceLabelDecimals = choosePriceLabelDecimals(priceLo, priceRange);
     char priceFmt[8];
     snprintf(priceFmt, sizeof(priceFmt), "%%.%df", priceLabelDecimals);
 
@@ -1961,7 +1965,7 @@ void renderChart() {
             hLineDash(MARGIN_L, MARGIN_L + CHART_W, y);
             char lbl[16];
             snprintf(lbl, sizeof(lbl), priceFmt, price);
-            int lblY = constrain(y - 3, MARGIN_T + 2, MARGIN_T + CHART_H - 9);
+            int lblY = constrain(y - 3, MARGIN_T + 1, MARGIN_T + CHART_H - 7);
             drawString(MARGIN_L + CHART_W + 5, lblY, lbl, 1);
         }
     }
