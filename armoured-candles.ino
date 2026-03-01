@@ -1393,7 +1393,6 @@ void handleDisplayBMP() {
 
 
 void handleUpdateArm() {
-    otaArmed = true;
     otaFailed = false;
     otaActive = false;
     otaProgressPct = 0;
