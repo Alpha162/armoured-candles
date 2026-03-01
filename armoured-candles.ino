@@ -1864,6 +1864,23 @@ void showWifiFailScreen() {
     renderStatusScreen("WIFI DISCONNECTED", l1, l2, l3, l4);
 }
 
+int choosePriceLabelDecimals(float priceStep) {
+    // Keep formatting lightweight: derive decimals directly from tick step size.
+    // Example: step 0.01 -> 2 decimals, step 0.0005 -> 4 decimals.
+    float normalizedStep = fabsf(priceStep);
+    if (normalizedStep < 1e-9f) return 2;
+
+    int decimals = 0;
+    while (normalizedStep < 1.0f && decimals < 6) {
+        normalizedStep *= 10.0f;
+        decimals++;
+    }
+
+    // Keep at least 2 decimals for consistency with larger-priced pairs.
+    if (decimals < 2) decimals = 2;
+    return decimals;
+}
+
 void renderChart() {
     bufClear();
 
@@ -1891,8 +1908,9 @@ void renderChart() {
     priceHi += pad; priceLo -= pad;
     priceRange = priceHi - priceLo;
 
+    float priceToYPx = (float)CHART_H / priceRange;
     auto priceToY = [&](float p) -> int {
-        return MARGIN_T + CHART_H - (int)((p - priceLo) / priceRange * CHART_H);
+        return MARGIN_T + CHART_H - (int)((p - priceLo) * priceToYPx);
     };
 
     // ── Title bar ──
@@ -1931,14 +1949,20 @@ void renderChart() {
     hLine(0, SCR_W - 1, MARGIN_T - 2);
 
     // ── Price grid ──
+    float priceStep = priceRange / 5.0f;
+    int priceLabelDecimals = choosePriceLabelDecimals(priceStep);
+    char priceFmt[8];
+    snprintf(priceFmt, sizeof(priceFmt), "%%.%df", priceLabelDecimals);
+
     for (int g = 0; g <= 5; g++) {
         float price = priceLo + priceRange * g / 5;
         int y = priceToY(price);
         if (y >= MARGIN_T && y <= MARGIN_T + CHART_H) {
             hLineDash(MARGIN_L, MARGIN_L + CHART_W, y);
             char lbl[16];
-            snprintf(lbl, sizeof(lbl), "%.2f", price);
-            drawString(MARGIN_L + CHART_W + 5, y - 3, lbl, 1);
+            snprintf(lbl, sizeof(lbl), priceFmt, price);
+            int lblY = constrain(y - 3, MARGIN_T + 2, MARGIN_T + CHART_H - 9);
+            drawString(MARGIN_L + CHART_W + 5, lblY, lbl, 1);
         }
     }
 
