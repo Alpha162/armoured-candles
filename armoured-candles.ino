@@ -88,7 +88,6 @@ bool     otaActive             = false;
 bool     otaNeedsRender        = false;
 bool     otaDisplayReady       = false;
 bool     otaFailed             = false;
-bool     otaArmed              = false;  // true after UI unlock slider arms OTA pre-screen
 int      otaProgressPct        = 0;
 unsigned long otaLastRenderMs  = 0;
 const unsigned long WIFI_RETRY_MS = 60000;    // retry STA every 60s when in AP mode
@@ -116,7 +115,7 @@ WebServer server(80);
 // ─── FORWARD DECLARATIONS ──────────────────────────────
 void startAPMode();
 void setupWebServer();
-void renderOtaProgressScreen(int pct, bool failed, bool armed);
+void renderOtaProgressScreen(int pct, bool failed);
 void updateOtaDisplay(bool forceFullRefresh);
 
 // ═══════════════════════════════════════════════════════
@@ -1229,7 +1228,6 @@ function uploadFirmware() {
 
   xhr.onerror = function() {
     if (pollTimer) clearInterval(pollTimer);
-    document.getElementById('fwUnlock').disabled = false;
     toast('Upload error', true);
   };
 
@@ -1291,7 +1289,6 @@ void handleStatus() {
     json += "\"otaActive\":" + String(otaActive ? "true" : "false") + ",";
     json += "\"otaProgress\":" + String(otaProgressPct) + ",";
     json += "\"otaFailed\":" + String(otaFailed ? "true" : "false") + ",";
-    json += "\"otaArmed\":" + String(otaArmed ? "true" : "false") + ",";
     json += "\"heap\":" + String(ESP.getFreeHeap());
     json += "}";
     server.send(200, "application/json", json);
@@ -1409,7 +1406,6 @@ void handleUpdateResult() {
     if (Update.hasError()) {
         otaFailed = true;
         otaActive = false;
-        otaArmed = false;
         otaProgressPct = 0;
         otaNeedsRender = true;
         updateOtaDisplay(true);
@@ -1427,7 +1423,6 @@ void handleUpdateResult() {
             otaDisplayReady = false;
         }
         otaActive = false;
-        otaArmed = false;
         server.send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting...\"}");
         delay(1200);
         ESP.restart();
@@ -1440,7 +1435,6 @@ void handleUpdateUpload() {
     if (upload.status == UPLOAD_FILE_START) {
         Serial.printf("OTA update: %s\n", upload.filename.c_str());
         otaActive = true;
-        otaArmed = false;
         otaFailed = false;
         otaProgressPct = 0;
         otaNeedsRender = true;
@@ -1479,7 +1473,6 @@ void handleUpdateUpload() {
         otaFailed = true;
         otaNeedsRender = true;
         otaActive = false;
-        otaArmed = false;
         Serial.println("OTA update aborted");
     }
 }
@@ -2016,7 +2009,7 @@ void showWifiFailScreen() {
 }
 
 
-void renderOtaProgressScreen(int pct, bool failed, bool armed) {
+void renderOtaProgressScreen(int pct, bool failed) {
     pct = constrain(pct, 0, 100);
     bufClear();
 
@@ -2025,11 +2018,11 @@ void renderOtaProgressScreen(int pct, bool failed, bool armed) {
     drawRect(bx, by, bw, bh);
     drawRect(bx + 1, by + 1, bw - 2, bh - 2);
 
-    const char* title = failed ? "OTA UPDATE FAILED" : (armed ? "FIRMWARE UPDATE READY" : "FIRMWARE UPDATE");
+    const char* title = failed ? "OTA UPDATE FAILED" : "FIRMWARE UPDATE";
     drawString(bx + (bw - (int)strlen(title) * 12) / 2, by + 24, title, 2);
     hLine(bx + 24, bx + bw - 24, by + 56);
 
-    const char* subtitle = failed ? "Please retry from Web GUI" : (armed ? "Upload can now begin from Web GUI" : "Writing firmware to flash...");
+    const char* subtitle = failed ? "Please retry from Web GUI" : "Writing firmware to flash...";
     drawString(bx + (bw - (int)strlen(subtitle) * 6) / 2, by + 78, subtitle, 1);
 
     int barX = bx + 60;
@@ -2054,7 +2047,7 @@ void renderOtaProgressScreen(int pct, bool failed, bool armed) {
     snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
     drawString(barX + (barW - (int)strlen(pctStr) * 12) / 2, barY + barH + 16, pctStr, 2);
 
-    const char* footer = failed ? "Device remains online for another upload" : (armed ? "Waiting for firmware file upload" : "Do not power off the device");
+    const char* footer = failed ? "Device remains online for another upload" : "Do not power off the device";
     drawString(bx + (bw - (int)strlen(footer) * 6) / 2, by + bh - 28, footer, 1);
 }
 
@@ -2071,7 +2064,7 @@ void updateOtaDisplay(bool forceFullRefresh) {
         memset(oldbuf, 0xFF, BUF_SIZE);
     }
 
-    renderOtaProgressScreen(otaProgressPct, otaFailed, otaArmed);
+    renderOtaProgressScreen(otaProgressPct, otaFailed);
 
     if (forceFullRefresh) {
         epd.DisplayFrame(framebuf);
