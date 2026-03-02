@@ -932,7 +932,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         Auto-refreshes every 30s &bull; <a href="/api/display" target="_blank" style="color:var(--accent);text-decoration:none">Open full size</a>
       </div>
       <div style="margin-top:4px;font-size:0.7em;color:var(--text-dim);font-family:'JetBrains Mono',monospace">
-        Trend blocks: \\ down, - level, / up &bull; highlighted band marks active state &bull; pips show confidence (1-3)
+        Trend blocks: left=down, middle=level, right=up &bull; pips show confidence (1-3)
       </div>
     </div>
   </div>
@@ -2601,26 +2601,7 @@ void drawTrendBlocks(int x, int y, int blockW, int blockH, int gap, TrendState s
         int bx = x + i * (blockW + gap);
         bool active = (state == TREND_DOWN && i == 0) || (state == TREND_FLAT && i == 1) || (state == TREND_UP && i == 2);
         drawRect(bx, y, blockW, blockH);
-
-        // Symbol inside each block: down (\), level (-), up (/)
-        int lx0 = bx + 2;
-        int lx1 = bx + blockW - 3;
-        int cy = y + blockH / 2;
-        if (i == 0) {
-            drawLine(lx0, y + 2, lx1, y + blockH - 3, false);
-        } else if (i == 1) {
-            hLine(lx0, lx1, cy);
-        } else {
-            drawLine(lx0, y + blockH - 3, lx1, y + 2, false);
-        }
-
-        // Active state highlight band makes selected direction obvious at a glance
-        if (active) {
-            drawRect(bx + 1, y + 1, blockW - 2, blockH - 2);
-            if (i == 0) fillRect(bx + 2, y + blockH - 3, blockW - 4, 2, true);      // down => bottom band
-            else if (i == 1) fillRect(bx + 2, cy - 1, blockW - 4, 2, true);          // level => middle band
-            else fillRect(bx + 2, y + 2, blockW - 4, 2, true);                        // up => top band
-        }
+        if (active) fillRect(bx + 1, y + 1, blockW - 2, blockH - 2, true);
     }
 }
 
@@ -2724,8 +2705,8 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     TrendState trend = classifyTrend(slot);
     int trendPips = trendConfidencePips(slot, trend);
 
-    int blockW = (vp.w < 500) ? 10 : (isFullScreen ? 14 : 12);
-    int blockH = (vp.w < 500) ? 8 : (isFullScreen ? 11 : 10);
+    int blockW = (vp.w < 500) ? 8 : (isFullScreen ? 12 : 10);
+    int blockH = (vp.w < 500) ? 7 : (isFullScreen ? 10 : 9);
     int blockGap = 2;
     int blocksW = blockW * 3 + blockGap * 2;
     int blocksX = vp.x + vp.w - 4 - blocksW;
