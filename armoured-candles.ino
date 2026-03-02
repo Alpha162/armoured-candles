@@ -931,6 +931,9 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
       <div style="margin-top:8px;font-size:0.72em;color:var(--text-dim);font-family:'JetBrains Mono',monospace">
         Auto-refreshes every 30s &bull; <a href="/api/display" target="_blank" style="color:var(--accent);text-decoration:none">Open full size</a>
       </div>
+      <div style="margin-top:4px;font-size:0.7em;color:var(--text-dim);font-family:'JetBrains Mono',monospace">
+        Trend blocks: \\ down, - level, / up &bull; highlighted band marks active state &bull; pips show confidence (1-3)
+      </div>
     </div>
   </div>
 
@@ -2533,6 +2536,103 @@ int choosePriceLabelDecimals(float priceLo, float priceRange) {
     return 6;
 }
 
+enum TrendState {
+    TREND_UP,
+    TREND_FLAT,
+    TREND_DOWN
+};
+
+TrendState classifyTrend(const ChartSlot& slot) {
+    if (slot.candleCount < 2) return TREND_FLAT;
+
+    const float pct = slot.lastPctChange;
+    int tail = min(4, slot.candleCount - 1);
+    float emaSlopePct = 0.0f;
+    if (tail > 0 && slot.lastPrice > 0.0f) {
+        float emaDelta = slot.emaFastArr[slot.candleCount - 1] - slot.emaFastArr[slot.candleCount - 1 - tail];
+        emaSlopePct = (emaDelta / slot.lastPrice) * 100.0f;
+    }
+
+    if (pct > 0.6f || (pct > 0.2f && emaSlopePct > 0.05f)) return TREND_UP;
+    if (pct < -0.6f || (pct < -0.2f && emaSlopePct < -0.05f)) return TREND_DOWN;
+    return TREND_FLAT;
+}
+
+int trendConfidencePips(const ChartSlot& slot, TrendState state) {
+    if (slot.candleCount < 3) return 1;
+
+    int score = 0;
+    int tail = min(12, slot.candleCount - 1);
+    int upMoves = 0, downMoves = 0;
+    for (int i = slot.candleCount - tail; i < slot.candleCount; i++) {
+        if (slot.candles[i].c > slot.candles[i - 1].c) upMoves++;
+        else if (slot.candles[i].c < slot.candles[i - 1].c) downMoves++;
+    }
+
+    float moveBias = (float)(upMoves - downMoves) / (float)tail;
+    float pctMag = fabsf(slot.lastPctChange);
+    float emaSlopePct = 0.0f;
+    if (slot.lastPrice > 0.0f) {
+        int emaTail = min(4, slot.candleCount - 1);
+        float emaDelta = slot.emaFastArr[slot.candleCount - 1] - slot.emaFastArr[slot.candleCount - 1 - emaTail];
+        emaSlopePct = (emaDelta / slot.lastPrice) * 100.0f;
+    }
+    float rsi = slot.rsiVal[slot.candleCount - 1];
+
+    if (state == TREND_UP) {
+        if (pctMag >= 0.8f) score++;
+        if (moveBias > 0.2f) score++;
+        if (emaSlopePct > 0.05f || rsi > 52.0f) score++;
+    } else if (state == TREND_DOWN) {
+        if (pctMag >= 0.8f) score++;
+        if (moveBias < -0.2f) score++;
+        if (emaSlopePct < -0.05f || rsi < 48.0f) score++;
+    } else {
+        if (pctMag <= 0.6f) score++;
+        if (fabsf(moveBias) < 0.2f) score++;
+        if (fabsf(emaSlopePct) < 0.05f && fabsf(rsi - 50.0f) < 7.0f) score++;
+    }
+
+    return constrain(score, 1, 3);
+}
+
+void drawTrendBlocks(int x, int y, int blockW, int blockH, int gap, TrendState state) {
+    for (int i = 0; i < 3; i++) {
+        int bx = x + i * (blockW + gap);
+        bool active = (state == TREND_DOWN && i == 0) || (state == TREND_FLAT && i == 1) || (state == TREND_UP && i == 2);
+        drawRect(bx, y, blockW, blockH);
+
+        // Symbol inside each block: down (\), level (-), up (/)
+        int lx0 = bx + 2;
+        int lx1 = bx + blockW - 3;
+        int cy = y + blockH / 2;
+        if (i == 0) {
+            drawLine(lx0, y + 2, lx1, y + blockH - 3, false);
+        } else if (i == 1) {
+            hLine(lx0, lx1, cy);
+        } else {
+            drawLine(lx0, y + blockH - 3, lx1, y + 2, false);
+        }
+
+        // Active state highlight band makes selected direction obvious at a glance
+        if (active) {
+            drawRect(bx + 1, y + 1, blockW - 2, blockH - 2);
+            if (i == 0) fillRect(bx + 2, y + blockH - 3, blockW - 4, 2, true);      // down => bottom band
+            else if (i == 1) fillRect(bx + 2, cy - 1, blockW - 4, 2, true);          // level => middle band
+            else fillRect(bx + 2, y + 2, blockW - 4, 2, true);                        // up => top band
+        }
+    }
+}
+
+void drawTrendPips(int x, int y, int count, int filled, int pipSize = 4, int gap = 2) {
+    filled = constrain(filled, 0, count);
+    for (int i = 0; i < count; i++) {
+        int px = x + i * (pipSize + gap);
+        if (i < filled) fillRect(px, y, pipSize, pipSize, true);
+        else drawRect(px, y, pipSize, pipSize);
+    }
+}
+
 void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     const SlotConfig& sc = slot.cfg;
     bool isFullScreen = (vp.w >= 700 && vp.h >= 400);
@@ -2620,13 +2720,30 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     // Price + pct on the right
     char priceStr[32];
     snprintf(priceStr, sizeof(priceStr), "%.2f %c%.1f%%", slot.lastPrice, pctSign, absPct);
-    drawStringR(vp.x + vp.w - 4, vp.y + (isFullScreen ? 3 : 3), priceStr, priceScale);
+
+    TrendState trend = classifyTrend(slot);
+    int trendPips = trendConfidencePips(slot, trend);
+
+    int blockW = (vp.w < 500) ? 10 : (isFullScreen ? 14 : 12);
+    int blockH = (vp.w < 500) ? 8 : (isFullScreen ? 11 : 10);
+    int blockGap = 2;
+    int blocksW = blockW * 3 + blockGap * 2;
+    int blocksX = vp.x + vp.w - 4 - blocksW;
+    int blocksY = vp.y + (isFullScreen ? 3 : 2);
+    drawTrendBlocks(blocksX, blocksY, blockW, blockH, blockGap, trend);
+
+    if (vp.w >= 500) {
+        drawTrendPips(blocksX, blocksY + blockH + 2, 3, trendPips, 3, 2);
+    }
+
+    int priceRight = blocksX - 4;
+    drawStringR(priceRight, vp.y + (isFullScreen ? 3 : 3), priceStr, priceScale);
 
     // IP address — only in full-screen single chart mode
     if (isFullScreen) {
         char ipStr[32];
         snprintf(ipStr, sizeof(ipStr), "%s", WiFi.localIP().toString().c_str());
-        drawStringR(vp.x + vp.w - 10, vp.y + 22, ipStr, 1);
+        drawStringR(priceRight - 6, vp.y + 22, ipStr, 1);
     }
 
     hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
