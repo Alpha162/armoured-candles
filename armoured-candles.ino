@@ -75,6 +75,25 @@ struct SlotConfig {
     int  emaSlow;
     int  rsiPeriod;
     bool heikinAshi;
+    bool eventCallouts;
+};
+
+enum SlotEventType {
+    SLOT_EVENT_NONE = 0,
+    SLOT_EVENT_EMA_CROSS_UP,
+    SLOT_EVENT_EMA_CROSS_DOWN,
+    SLOT_EVENT_RSI_ENTER_OVERBOUGHT,
+    SLOT_EVENT_RSI_EXIT_OVERBOUGHT,
+    SLOT_EVENT_RSI_ENTER_OVERSOLD,
+    SLOT_EVENT_RSI_EXIT_OVERSOLD,
+    SLOT_EVENT_BREAKOUT_HIGH,
+    SLOT_EVENT_BREAKOUT_LOW
+};
+
+struct SlotEvent {
+    uint64_t ts;
+    SlotEventType type;
+    char message[64];
 };
 
 struct ChartSlot {
@@ -86,6 +105,7 @@ struct ChartSlot {
     int    candleCount;
     float  lastPrice;
     float  lastPctChange;
+    SlotEvent lastEvent;
 };
 
 // ─── RUNTIME CONFIG (loaded from NVS) ──────────────────
@@ -418,6 +438,88 @@ void calcRSI() {
     }
 }
 
+
+
+const char* slotEventTypeToStr(SlotEventType type) {
+    switch (type) {
+        case SLOT_EVENT_EMA_CROSS_UP: return "ema_cross_up";
+        case SLOT_EVENT_EMA_CROSS_DOWN: return "ema_cross_down";
+        case SLOT_EVENT_RSI_ENTER_OVERBOUGHT: return "rsi_enter_overbought";
+        case SLOT_EVENT_RSI_EXIT_OVERBOUGHT: return "rsi_exit_overbought";
+        case SLOT_EVENT_RSI_ENTER_OVERSOLD: return "rsi_enter_oversold";
+        case SLOT_EVENT_RSI_EXIT_OVERSOLD: return "rsi_exit_oversold";
+        case SLOT_EVENT_BREAKOUT_HIGH: return "breakout_high";
+        case SLOT_EVENT_BREAKOUT_LOW: return "breakout_low";
+        case SLOT_EVENT_NONE:
+        default: return "none";
+    }
+}
+
+void setSlotEvent(ChartSlot& slot, SlotEventType type, uint64_t ts, const char* msg) {
+    slot.lastEvent.ts = ts;
+    slot.lastEvent.type = type;
+    const char* safeMsg = msg ? msg : "";
+    strncpy(slot.lastEvent.message, safeMsg, sizeof(slot.lastEvent.message) - 1);
+    slot.lastEvent.message[sizeof(slot.lastEvent.message) - 1] = '\0';
+}
+
+void detectSlotEvents(ChartSlot& slot) {
+    if (!slot.cfg.eventCallouts || slot.candleCount < 3) return;
+
+    int i = slot.candleCount - 1;
+    int prev = i - 1;
+    uint64_t ts = slot.candles[i].t;
+
+    float fastPrev = slot.emaFastArr[prev];
+    float slowPrev = slot.emaSlowArr[prev];
+    float fastNow = slot.emaFastArr[i];
+    float slowNow = slot.emaSlowArr[i];
+
+    if (fastPrev <= slowPrev && fastNow > slowNow) {
+        setSlotEvent(slot, SLOT_EVENT_EMA_CROSS_UP, ts, "EMA fast crossed above slow");
+        return;
+    }
+    if (fastPrev >= slowPrev && fastNow < slowNow) {
+        setSlotEvent(slot, SLOT_EVENT_EMA_CROSS_DOWN, ts, "EMA fast crossed below slow");
+        return;
+    }
+
+    float rsiPrev = slot.rsiVal[prev];
+    float rsiNow = slot.rsiVal[i];
+    if (rsiPrev <= 70.0f && rsiNow > 70.0f) {
+        setSlotEvent(slot, SLOT_EVENT_RSI_ENTER_OVERBOUGHT, ts, "RSI entered overbought (>70)");
+        return;
+    }
+    if (rsiPrev > 70.0f && rsiNow <= 70.0f) {
+        setSlotEvent(slot, SLOT_EVENT_RSI_EXIT_OVERBOUGHT, ts, "RSI exited overbought");
+        return;
+    }
+    if (rsiPrev >= 30.0f && rsiNow < 30.0f) {
+        setSlotEvent(slot, SLOT_EVENT_RSI_ENTER_OVERSOLD, ts, "RSI entered oversold (<30)");
+        return;
+    }
+    if (rsiPrev < 30.0f && rsiNow >= 30.0f) {
+        setSlotEvent(slot, SLOT_EVENT_RSI_EXIT_OVERSOLD, ts, "RSI exited oversold");
+        return;
+    }
+
+    int lookback = min(20, slot.candleCount - 1);
+    float recentHi = -1e9f;
+    float recentLo = 1e9f;
+    for (int j = i - lookback; j < i; j++) {
+        if (slot.candles[j].h > recentHi) recentHi = slot.candles[j].h;
+        if (slot.candles[j].l < recentLo) recentLo = slot.candles[j].l;
+    }
+    float closeNow = slot.candles[i].c;
+    if (closeNow > recentHi) {
+        setSlotEvent(slot, SLOT_EVENT_BREAKOUT_HIGH, ts, "Breakout above recent high");
+        return;
+    }
+    if (closeNow < recentLo) {
+        setSlotEvent(slot, SLOT_EVENT_BREAKOUT_LOW, ts, "Breakdown below recent low");
+        return;
+    }
+}
 // ═══════════════════════════════════════════════════════
 // INTERVAL HELPERS
 // ═══════════════════════════════════════════════════════
@@ -566,6 +668,7 @@ void initSlotDefaults(SlotConfig& cfg) {
     cfg.emaSlow = 21;
     cfg.rsiPeriod = 14;
     cfg.heikinAshi = false;
+    cfg.eventCallouts = true;
 }
 
 void loadSlotConfig(int i) {
@@ -610,6 +713,8 @@ void loadSlotConfig(int i) {
     slots[i].cfg.rsiPeriod = prefs.getInt(key, slots[i].cfg.rsiPeriod);
     snprintf(key, sizeof(key), "s%dheikinAsh", i);
     slots[i].cfg.heikinAshi = prefs.getBool(key, slots[i].cfg.heikinAshi);
+    snprintf(key, sizeof(key), "s%deventCall", i);
+    slots[i].cfg.eventCallouts = prefs.getBool(key, slots[i].cfg.eventCallouts);
 }
 
 void saveSlotConfig(int i) {
@@ -634,6 +739,8 @@ void saveSlotConfig(int i) {
     prefs.putInt(key, slots[i].cfg.rsiPeriod);
     snprintf(key, sizeof(key), "s%dheikinAsh", i);
     prefs.putBool(key, slots[i].cfg.heikinAshi);
+    snprintf(key, sizeof(key), "s%deventCall", i);
+    prefs.putBool(key, slots[i].cfg.eventCallouts);
 }
 
 void loadConfig() {
@@ -657,6 +764,9 @@ void loadConfig() {
         slots[i].candleCount = 0;
         slots[i].lastPrice = 0;
         slots[i].lastPctChange = 0;
+        slots[i].lastEvent.ts = 0;
+        slots[i].lastEvent.type = SLOT_EVENT_NONE;
+        slots[i].lastEvent.message[0] = '\0';
     }
 
     // Check for migration from old single-chart format
@@ -692,6 +802,7 @@ void loadConfig() {
         slots[0].cfg.emaSlow     = prefs.getInt("emaSlow", 21);
         slots[0].cfg.rsiPeriod   = prefs.getInt("rsiPeriod", 14);
         slots[0].cfg.heikinAshi  = prefs.getBool("heikinAshi", false);
+        slots[0].cfg.eventCallouts = true;
 
         // Copy slot 0 config to slots 1-3
         for (int i = 1; i < MAX_SLOTS; i++) {
@@ -1158,6 +1269,8 @@ function buildSlotCards() {
       '<div id="autoInfo_'+i+'" class="auto-info"></div>' +
       '<div class="toggle-row" style="margin-top:8px"><span class="label">Heikin Ashi</span>' +
       '<label class="toggle"><input type="checkbox" id="heikinAshi_'+i+'"><span class="slider"></span></label></div>' +
+      '<div class=\"toggle-row\" style=\"margin-top:8px\"><span class=\"label\">Event callouts</span>' +
+      '<label class=\"toggle\"><input type=\"checkbox\" id=\"eventCallouts_'+i+'\" checked><span class=\"slider\"></span></label></div>' +
       '<div class="field" id="manualCandleField_'+i+'" style="margin-top:10px;display:none">' +
       '<label>Candles</label><input type="number" id="numCandles_'+i+'" min="5" max="200" value="60"></div>' +
       '<div class="row" style="margin-top:10px">' +
@@ -1405,6 +1518,7 @@ async function loadConfig() {
       el('emaSlow_'+i).value = s.emaSlow || 21;
       el('rsiPeriod_'+i).value = s.rsiPeriod || 14;
       el('heikinAshi_'+i).checked = s.heikinAshi || false;
+      el('eventCallouts_'+i).checked = s.eventCallouts !== false;
       updateSlotAutoInfo(i);
     }
 
@@ -1447,7 +1561,8 @@ async function saveConfig() {
       emaFast: parseInt(el('emaFast_'+i).value) || 9,
       emaSlow: parseInt(el('emaSlow_'+i).value) || 21,
       rsiPeriod: parseInt(el('rsiPeriod_'+i).value) || 14,
-      heikinAshi: el('heikinAshi_'+i).checked
+      heikinAshi: el('heikinAshi_'+i).checked,
+      eventCallouts: el('eventCallouts_'+i).checked
     });
   }
   var body = {
@@ -1564,6 +1679,10 @@ void handleStatus() {
     doc["emaSlow"] = slots[0].cfg.emaSlow;
     doc["rsiPeriod"] = slots[0].cfg.rsiPeriod;
     doc["heikinAshi"] = slots[0].cfg.heikinAshi;
+    doc["eventCallouts"] = slots[0].cfg.eventCallouts;
+    doc["eventTs"] = slots[0].lastEvent.ts;
+    doc["eventType"] = slotEventTypeToStr(slots[0].lastEvent.type);
+    doc["eventMessage"] = slots[0].lastEvent.message;
 
     // Global settings
     doc["layout"] = cfgLayout;
@@ -1605,8 +1724,12 @@ void handleStatus() {
         s["emaSlow"] = slots[i].cfg.emaSlow;
         s["rsiPeriod"] = slots[i].cfg.rsiPeriod;
         s["heikinAshi"] = slots[i].cfg.heikinAshi;
+        s["eventCallouts"] = slots[i].cfg.eventCallouts;
         s["price"] = slots[i].lastPrice;
         s["pctChange"] = slots[i].lastPctChange;
+        s["eventTs"] = slots[i].lastEvent.ts;
+        s["eventType"] = slotEventTypeToStr(slots[i].lastEvent.type);
+        s["eventMessage"] = slots[i].lastEvent.message;
     }
 
     String out;
@@ -1683,6 +1806,7 @@ void handleConfigPost() {
             if (s.containsKey("emaSlow"))     sc.emaSlow     = constrain(s["emaSlow"].as<int>(), 2, 200);
             if (s.containsKey("rsiPeriod"))   sc.rsiPeriod   = constrain(s["rsiPeriod"].as<int>(), 2, 100);
             if (s.containsKey("heikinAshi"))  sc.heikinAshi  = s["heikinAshi"].as<bool>();
+            if (s.containsKey("eventCallouts")) sc.eventCallouts = s["eventCallouts"].as<bool>();
         }
     } else {
         // Backward-compat: old format without "slots" — apply to slot 0
@@ -1712,6 +1836,7 @@ void handleConfigPost() {
         if (doc.containsKey("emaSlow"))     sc.emaSlow     = constrain(doc["emaSlow"].as<int>(), 2, 200);
         if (doc.containsKey("rsiPeriod"))   sc.rsiPeriod   = constrain(doc["rsiPeriod"].as<int>(), 2, 100);
         if (doc.containsKey("heikinAshi"))  sc.heikinAshi  = doc["heikinAshi"].as<bool>();
+        if (doc.containsKey("eventCallouts")) sc.eventCallouts = doc["eventCallouts"].as<bool>();
     }
 
     // Keep scratch globals in sync with slot 0
@@ -2399,6 +2524,7 @@ bool fetchSlotCandles(int slotIdx) {
         slots[slotIdx].candleCount = candleCount;
         slots[slotIdx].lastPrice = lastPrice;
         slots[slotIdx].lastPctChange = lastPctChange;
+        detectSlotEvents(slots[slotIdx]);
     }
 
     // Restore globals
@@ -2753,6 +2879,44 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     }
 
     hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
+
+    // Event strip
+    if (sc.eventCallouts && slot.lastEvent.type != SLOT_EVENT_NONE && slot.lastEvent.message[0] != '\0') {
+        char eventText[96];
+        char timeBuf[8] = "";
+        if (slot.lastEvent.ts > 0) {
+            time_t ets = (time_t)(slot.lastEvent.ts / 1000ULL);
+            struct tm* etm = gmtime(&ets);
+            if (etm) snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", etm->tm_hour, etm->tm_min);
+        }
+        if (timeBuf[0] != '\0') snprintf(eventText, sizeof(eventText), "%s %s", timeBuf, slot.lastEvent.message);
+        else snprintf(eventText, sizeof(eventText), "%s", slot.lastEvent.message);
+
+        int stripX = vp.x + mL;
+        int stripY = vp.y + mT + 2;
+        int stripW = chartW - 2;
+        if (stripW > 60) {
+            drawRect(stripX, stripY, stripW, 9);
+            int maxChars = (stripW - 6) / 6;
+            if (maxChars > 4) {
+                char clipped[96];
+                strncpy(clipped, eventText, sizeof(clipped) - 1);
+                clipped[sizeof(clipped) - 1] = '\0';
+                int n = strlen(clipped);
+                if (n > maxChars) {
+                    if (maxChars >= 3) {
+                        clipped[maxChars - 3] = '.';
+                        clipped[maxChars - 2] = '.';
+                        clipped[maxChars - 1] = '.';
+                        clipped[maxChars] = '\0';
+                    } else {
+                        clipped[maxChars] = '\0';
+                    }
+                }
+                drawString(stripX + 3, stripY + 1, clipped, 1);
+            }
+        }
+    }
 
     // ── Price grid ──
     int priceLabelDecimals = choosePriceLabelDecimals(priceLo, priceRange);
