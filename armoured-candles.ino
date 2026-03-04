@@ -202,6 +202,7 @@ void renderOtaProgressScreen(int pct, bool failed);
 void updateOtaDisplay(bool forceFullRefresh);
 bool authenticateRequest();
 MoodInfo getAggregateMood();
+MoodInfo moodFromPct(float pct);
 void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen);
 void handlePoloniexMarkets();
 
@@ -2848,24 +2849,13 @@ static const uint8_t moodFaceBullish[] PROGMEM = {
     0x3C, 0x42, 0xA5, 0x81, 0x99, 0xA5, 0x42, 0x3C
 };
 
-MoodInfo getAggregateMood() {
-    int active = constrain(cfgLayout, 1, MAX_SLOTS);
-    int tracked = 0;
-    float sum = 0.0f;
+MoodInfo moodFromPct(float pct) {
+    MoodInfo mood = {MOOD_NEUTRAL, "STABLE", "none", pct};
 
-    for (int i = 0; i < active; i++) {
-        if (slots[i].candleCount < 2) continue;
-        tracked++;
-        sum += slots[i].lastPctChange;
-    }
-
-    float aggPct = (tracked > 0) ? (sum / tracked) : 0.0f;
-    MoodInfo mood = {MOOD_NEUTRAL, "STABLE", "none", aggPct};
-
-    if (aggPct <= -1.25f) mood.id = MOOD_VERY_BEARISH;
-    else if (aggPct <= -0.35f) mood.id = MOOD_BEARISH;
-    else if (aggPct >= 1.25f) mood.id = MOOD_VERY_BULLISH;
-    else if (aggPct >= 0.35f) mood.id = MOOD_BULLISH;
+    if (pct <= -1.25f) mood.id = MOOD_VERY_BEARISH;
+    else if (pct <= -0.35f) mood.id = MOOD_BEARISH;
+    else if (pct >= 1.25f) mood.id = MOOD_VERY_BULLISH;
+    else if (pct >= 0.35f) mood.id = MOOD_BULLISH;
     else mood.id = MOOD_NEUTRAL;
 
     if (cfgCaptionVerbosity == 0) {
@@ -2893,6 +2883,21 @@ MoodInfo getAggregateMood() {
     else mood.style = "none";
 
     return mood;
+}
+
+MoodInfo getAggregateMood() {
+    int active = constrain(cfgLayout, 1, MAX_SLOTS);
+    int tracked = 0;
+    float sum = 0.0f;
+
+    for (int i = 0; i < active; i++) {
+        if (slots[i].candleCount < 2) continue;
+        tracked++;
+        sum += slots[i].lastPctChange;
+    }
+
+    float aggPct = (tracked > 0) ? (sum / tracked) : 0.0f;
+    return moodFromPct(aggPct);
 }
 
 void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen) {
@@ -3037,7 +3042,8 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
         drawStringR(priceRight - 6, vp.y + 22 + moodReserve, ipStr, 1);
     }
 
-    drawMoodHud(vp, currentMood, isFullScreen);
+    MoodInfo slotMood = isFullScreen ? currentMood : moodFromPct(slot.lastPctChange);
+    drawMoodHud(vp, slotMood, isFullScreen);
     hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
 
     // Event strip
