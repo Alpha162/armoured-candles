@@ -35,7 +35,7 @@
 
 // ─── COMPILE-TIME CONSTANTS ────────────────────────────
 #ifndef FW_VERSION
-#define FW_VERSION "dev"
+#define FW_VERSION "v1.0.0"
 #endif
 
 #define MAX_CANDLES     200
@@ -1589,6 +1589,7 @@ void handleStatus() {
     doc["otaProgress"] = otaProgressPct;
     doc["otaFailed"] = otaFailed;
     doc["heap"] = ESP.getFreeHeap();
+    doc["fwVersion"] = FW_VERSION;
 
     // Per-slot config array
     JsonArray slotsArr = doc.createNestedArray("slots");

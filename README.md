@@ -8,7 +8,7 @@ The firmware fetches OHLCV data, renders candles + indicators into a 1-bit frame
 
 ## What's New
 
-Compared to early versions, the project now includes:
+This README reflects the current firmware feature set after recent improvements, including:
 
 - **Multi-panel layouts (1 / 2 / 3 / 4 charts)** rendered on a single 800×480 display
 - **Per-panel chart configuration** (exchange, pair, interval, indicators, HA mode)
@@ -36,12 +36,12 @@ Compared to early versions, the project now includes:
 
 The boot splash shows `Version <FW_VERSION>`.
 
-- If you do not pass a build flag, firmware defaults to `FW_VERSION="dev"`.
+- If you do not pass a build flag, firmware defaults to `FW_VERSION="v1.0.0"`.
 - To override in PlatformIO, add for example:
 
 ```ini
 build_flags =
-  -DFW_VERSION="v1.2.3"
+  -DFW_VERSION="v1.0.1"
 ```
 
 ## Hardware
@@ -210,7 +210,7 @@ Per-panel defaults:
 ## HTTP Endpoints
 
 - `GET /` — Web UI
-- `GET /api/status` — current runtime + config snapshot
+- `GET /api/status` — current runtime + config snapshot (includes `fwVersion`)
 - `POST /api/config` — save config
 - `POST /api/refresh` — force redraw/update
 - `POST /api/restart` — reboot device
