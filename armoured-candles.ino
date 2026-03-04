@@ -2346,6 +2346,7 @@ bool fetchCandlesHyperliquid(int numCandles, uint64_t startMs, uint64_t nowMs) {
     int total = arr.size();
     int skip = (total > numCandles) ? total - numCandles : 0;
 
+
     for (int i = skip; i < total && candleCount < numCandles; i++) {
         JsonObject c = arr[i];
         candles[candleCount].o = atof(c["o"].as<const char*>());
@@ -2520,6 +2521,13 @@ bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     candleCount = 0;
     int total = arr.size();
     int skip = (total > numCandles) ? total - numCandles : 0;
+
+    if (total > 0) {
+        JsonVariant first = arr[0];
+        if (first.is<JsonObject>()) Serial.println("Poloniex candle payload shape: object");
+        else if (first.is<JsonArray>()) Serial.println("Poloniex candle payload shape: array");
+        else Serial.println("Poloniex candle payload shape: unknown");
+    }
 
     for (int i = skip; i < total && candleCount < numCandles; i++) {
         JsonObject c = arr[i];
