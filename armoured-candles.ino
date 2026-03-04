@@ -2346,6 +2346,7 @@ bool fetchCandlesHyperliquid(int numCandles, uint64_t startMs, uint64_t nowMs) {
     int total = arr.size();
     int skip = (total > numCandles) ? total - numCandles : 0;
 
+
     for (int i = skip; i < total && candleCount < numCandles; i++) {
         JsonObject c = arr[i];
         candles[candleCount].o = atof(c["o"].as<const char*>());
@@ -2469,6 +2470,36 @@ bool fetchCandlesKraken(int numCandles, uint64_t startMs) {
     return candleCount > 0;
 }
 
+static bool readJsonFloat(JsonVariantConst value, float& out) {
+    if (value.isNull()) return false;
+    if (value.is<const char*>()) {
+        const char* s = value.as<const char*>();
+        if (!s || !*s) return false;
+        out = atof(s);
+        return true;
+    }
+    if (value.is<float>() || value.is<double>() || value.is<int>() || value.is<long>() || value.is<unsigned long>()) {
+        out = value.as<float>();
+        return true;
+    }
+    return false;
+}
+
+static bool readJsonU64(JsonVariantConst value, uint64_t& out) {
+    if (value.isNull()) return false;
+    if (value.is<const char*>()) {
+        const char* s = value.as<const char*>();
+        if (!s || !*s) return false;
+        out = strtoull(s, nullptr, 10);
+        return out != 0;
+    }
+    if (value.is<uint64_t>() || value.is<unsigned long>() || value.is<unsigned int>() || value.is<int>() || value.is<long>()) {
+        out = value.as<uint64_t>();
+        return out != 0;
+    }
+    return false;
+}
+
 // ── Poloniex ─────────────────────────────────────────
 bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     char symbol[32];
@@ -2506,14 +2537,47 @@ bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     int total = arr.size();
     int skip = (total > numCandles) ? total - numCandles : 0;
 
+    if (total > 0) {
+        JsonVariant first = arr[0];
+        if (first.is<JsonObject>()) Serial.println("Poloniex candle payload shape: object");
+        else if (first.is<JsonArray>()) Serial.println("Poloniex candle payload shape: array");
+        else Serial.println("Poloniex candle payload shape: unknown");
+    }
+
     for (int i = skip; i < total && candleCount < numCandles; i++) {
-        JsonObject c = arr[i];
-        candles[candleCount].o = atof(c["open"].as<const char*>());
-        candles[candleCount].h = atof(c["high"].as<const char*>());
-        candles[candleCount].l = atof(c["low"].as<const char*>());
-        candles[candleCount].c = atof(c["close"].as<const char*>());
-        candles[candleCount].v = atof(c["quantity"].as<const char*>());
-        candles[candleCount].t = c["startTime"].as<uint64_t>();
+        JsonVariant cv = arr[i];
+
+        float o, h, l, cl, v;
+        uint64_t t;
+        bool ok = false;
+
+        if (cv.is<JsonObject>()) {
+            JsonObject c = cv.as<JsonObject>();
+            ok = readJsonFloat(c["open"], o) && readJsonFloat(c["high"], h) && readJsonFloat(c["low"], l) &&
+                 readJsonFloat(c["close"], cl) &&
+                 (readJsonFloat(c["quantity"], v) || readJsonFloat(c["amount"], v)) &&
+                 readJsonU64(c["startTime"], t);
+        } else if (cv.is<JsonArray>()) {
+            // Alternate payload shape: [startTime, open, high, low, close, amount, quantity, ...]
+            JsonArray c = cv.as<JsonArray>();
+            ok = (c.size() >= 7) &&
+                 readJsonU64(c[0], t) &&
+                 readJsonFloat(c[1], o) && readJsonFloat(c[2], h) && readJsonFloat(c[3], l) &&
+                 readJsonFloat(c[4], cl) &&
+                 (readJsonFloat(c[6], v) || readJsonFloat(c[5], v));
+        }
+
+        if (!ok) {
+            Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
+            continue;
+        }
+
+        candles[candleCount].o = o;
+        candles[candleCount].h = h;
+        candles[candleCount].l = l;
+        candles[candleCount].c = cl;
+        candles[candleCount].v = v;
+        candles[candleCount].t = t;
         candleCount++;
     }
     return candleCount > 0;
