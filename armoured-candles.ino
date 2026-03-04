@@ -2469,6 +2469,21 @@ bool fetchCandlesKraken(int numCandles, uint64_t startMs) {
     return candleCount > 0;
 }
 
+static bool readJsonFloat(JsonVariantConst value, float& out) {
+    if (value.isNull()) return false;
+    if (value.is<const char*>()) {
+        const char* s = value.as<const char*>();
+        if (!s || !*s) return false;
+        out = atof(s);
+        return true;
+    }
+    if (value.is<float>() || value.is<double>() || value.is<int>() || value.is<long>() || value.is<unsigned long>()) {
+        out = value.as<float>();
+        return true;
+    }
+    return false;
+}
+
 // ── Poloniex ─────────────────────────────────────────
 bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     char symbol[32];
@@ -2508,12 +2523,29 @@ bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
 
     for (int i = skip; i < total && candleCount < numCandles; i++) {
         JsonObject c = arr[i];
-        candles[candleCount].o = atof(c["open"].as<const char*>());
-        candles[candleCount].h = atof(c["high"].as<const char*>());
-        candles[candleCount].l = atof(c["low"].as<const char*>());
-        candles[candleCount].c = atof(c["close"].as<const char*>());
-        candles[candleCount].v = atof(c["quantity"].as<const char*>());
-        candles[candleCount].t = c["startTime"].as<uint64_t>();
+        float o, h, l, cl, v;
+        if (!readJsonFloat(c["open"], o) || !readJsonFloat(c["high"], h) || !readJsonFloat(c["low"], l) ||
+            !readJsonFloat(c["close"], cl) || !readJsonFloat(c["quantity"], v)) {
+            Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
+            continue;
+        }
+
+        uint64_t t = c["startTime"].as<uint64_t>();
+        if (t == 0 && c["startTime"].is<const char*>()) {
+            const char* ts = c["startTime"].as<const char*>();
+            if (ts && *ts) t = strtoull(ts, nullptr, 10);
+        }
+        if (t == 0) {
+            Serial.printf("Poloniex: skipping candle with invalid startTime at index %d\n", i);
+            continue;
+        }
+
+        candles[candleCount].o = o;
+        candles[candleCount].h = h;
+        candles[candleCount].l = l;
+        candles[candleCount].c = cl;
+        candles[candleCount].v = v;
+        candles[candleCount].t = t;
         candleCount++;
     }
     return candleCount > 0;
