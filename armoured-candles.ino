@@ -22,6 +22,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <time.h>
@@ -30,6 +31,7 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <ctype.h>
+#include "mbedtls/sha256.h"
 #include "epd7in5_V2.h"
 #include "armoured_bird_64x64_bitmap.h"
 
@@ -37,6 +39,13 @@
 #ifndef FW_VERSION
 #define FW_VERSION "v1.0.0"
 #endif
+
+#ifndef FW_BOARD_ID
+#define FW_BOARD_ID "xiao-esp32s3-epdchart"
+#endif
+
+// Optional TLS pinning fingerprint for remote OTA HTTPS (SHA1, 59 chars with colons).
+static const char* REMOTE_OTA_TLS_FINGERPRINT = "";
 
 #define MAX_CANDLES     200
 #define MAX_SLOTS       4
@@ -176,6 +185,16 @@ const unsigned long OTA_RENDER_INTERVAL_MS = 800;
 unsigned long lastWifiCheckMs  = 0;
 const int MAX_CONSECUTIVE_FAILS = 3;          // force WiFi reset after this many
 
+bool     remoteOtaEnabled = false;
+char     remoteOtaManifestUrl[257] = "";
+int      remoteOtaCheckMin = 60;
+char     remoteOtaChannel[16] = "stable";
+bool     remoteOtaAutoApply = false;
+bool     remoteOtaAllowDowngrade = false;
+unsigned long lastRemoteOtaCheckMs = 0;
+unsigned long remoteOtaNextAllowedMs = 0;
+int      remoteOtaFailureCount = 0;
+
 // ─── FRAMEBUFFER ────────────────────────────────────────
 static unsigned char framebuf[BUF_SIZE];
 static unsigned char oldbuf[BUF_SIZE];
@@ -205,6 +224,7 @@ MoodInfo getAggregateMood();
 MoodInfo moodFromPct(float pct);
 void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen);
 void handlePoloniexMarkets();
+void remoteOtaTick();
 
 // ═══════════════════════════════════════════════════════
 // 5x7 FONT
@@ -668,6 +688,37 @@ bool isValidSymbolToken(const char* s, size_t maxLen) {
     return true;
 }
 
+bool isHttpUrl(const char* s) {
+    if (!s) return false;
+    size_t n = strlen(s);
+    if (n < 10 || n > 256) return false;
+    return strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0;
+}
+
+bool isValidRemoteChannel(const char* s) {
+    return s && (strcmp(s, "stable") == 0 || strcmp(s, "beta") == 0);
+}
+
+bool parseSemver(const char* v, int out[3]) {
+    if (!v || !out) return false;
+    const char* p = v;
+    if (*p == 'v' || *p == 'V') p++;
+    int major = 0, minor = 0, patch = 0;
+    if (sscanf(p, "%d.%d.%d", &major, &minor, &patch) != 3) return false;
+    out[0] = major; out[1] = minor; out[2] = patch;
+    return true;
+}
+
+int compareSemver(const char* a, const char* b) {
+    int av[3], bv[3];
+    if (!parseSemver(a, av) || !parseSemver(b, bv)) return strcmp(a ? a : "", b ? b : "");
+    for (int i = 0; i < 3; i++) {
+        if (av[i] < bv[i]) return -1;
+        if (av[i] > bv[i]) return 1;
+    }
+    return 0;
+}
+
 bool authEnabled() {
     return cfgUiUser[0] != '\0' && cfgUiPass[0] != '\0';
 }
@@ -781,6 +832,17 @@ void loadConfig() {
     if (cfgLayout < 1 || cfgLayout > 4) cfgLayout = 1;
     cfgPersonalityEnabled = prefs.getBool("personality", true);
     cfgCaptionVerbosity = constrain(prefs.getInt("captionVerb", 1), 0, 2);
+    remoteOtaEnabled = prefs.getBool("rOtaEn", false);
+    s = prefs.getString("rOtaUrl", "");
+    copyBounded(remoteOtaManifestUrl, sizeof(remoteOtaManifestUrl), s.c_str());
+    remoteOtaCheckMin = constrain(prefs.getInt("rOtaChkMin", 60), 5, 1440);
+    s = prefs.getString("rOtaChan", "stable");
+    copyBounded(remoteOtaChannel, sizeof(remoteOtaChannel), s.c_str());
+    if (!(strcmp(remoteOtaChannel, "stable") == 0 || strcmp(remoteOtaChannel, "beta") == 0)) {
+        copyBounded(remoteOtaChannel, sizeof(remoteOtaChannel), "stable");
+    }
+    remoteOtaAutoApply = prefs.getBool("rOtaAuto", false);
+    remoteOtaAllowDowngrade = prefs.getBool("rOtaAllowDw", false);
 
     // Initialize all slots with defaults
     for (int i = 0; i < MAX_SLOTS; i++) {
@@ -870,6 +932,12 @@ void saveConfig() {
     prefs.putInt("layout", cfgLayout);
     prefs.putBool("personality", cfgPersonalityEnabled);
     prefs.putInt("captionVerb", cfgCaptionVerbosity);
+    prefs.putBool("rOtaEn", remoteOtaEnabled);
+    prefs.putString("rOtaUrl", remoteOtaManifestUrl);
+    prefs.putInt("rOtaChkMin", remoteOtaCheckMin);
+    prefs.putString("rOtaChan", remoteOtaChannel);
+    prefs.putBool("rOtaAuto", remoteOtaAutoApply);
+    prefs.putBool("rOtaAllowDw", remoteOtaAllowDowngrade);
 
     for (int i = 0; i < MAX_SLOTS; i++) {
         saveSlotConfig(i);
@@ -1222,6 +1290,36 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
       <button id="fwUploadBtn" class="btn" onclick="uploadFirmware()" disabled style="margin-top:10px;width:100%;justify-content:center;opacity:.65;cursor:not-allowed">
         &#8679; Upload &amp; Install
       </button>
+      <hr style="border:0;border-top:1px solid var(--border);margin:16px 0">
+      <div class="field">
+        <label>Remote OTA Polling</label>
+        <label class="toggle"><input type="checkbox" id="remoteOtaEnabled"><span class="slider"></span></label>
+      </div>
+      <div class="field">
+        <label>Manifest URL</label>
+        <input type="text" id="remoteOtaManifestUrl" placeholder="https://updates.example.com/manifest.json">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Check interval (min)</label>
+          <input type="number" id="remoteOtaCheckMin" min="5" max="1440" value="60">
+        </div>
+        <div class="field">
+          <label>Channel</label>
+          <select id="remoteOtaChannel"><option value="stable">stable</option><option value="beta">beta</option></select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Auto apply</label>
+          <label class="toggle"><input type="checkbox" id="remoteOtaAutoApply"><span class="slider"></span></label>
+        </div>
+        <div class="field">
+          <label>Allow downgrade</label>
+          <label class="toggle"><input type="checkbox" id="remoteOtaAllowDowngrade"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div class="hint">HTTPS strongly recommended. Leave auto-apply off for notify-only mode.</div>
     </div>
   </div>
 
@@ -1538,6 +1636,12 @@ async function loadConfig() {
     el('ssid').value = d.ssid || '';
     el('uiUser').value = d.uiUser || '';
     el('uiPass').value = '';
+    el('remoteOtaEnabled').checked = !!d.remoteOtaEnabled;
+    el('remoteOtaManifestUrl').value = d.remoteOtaManifestUrl || '';
+    el('remoteOtaCheckMin').value = d.remoteOtaCheckMin || 60;
+    el('remoteOtaChannel').value = (d.remoteOtaChannel === 'beta') ? 'beta' : 'stable';
+    el('remoteOtaAutoApply').checked = !!d.remoteOtaAutoApply;
+    el('remoteOtaAllowDowngrade').checked = !!d.remoteOtaAllowDowngrade;
     setAuthHeader();
 
     // Per-slot config
@@ -1588,6 +1692,20 @@ async function loadConfig() {
 }
 
 async function saveConfig() {
+  var remoteUrl = el('remoteOtaManifestUrl').value.trim();
+  var remoteEnabled = el('remoteOtaEnabled').checked;
+  var remoteMin = parseInt(el('remoteOtaCheckMin').value, 10);
+  if (remoteEnabled) {
+    if (!/^https?:\/\//i.test(remoteUrl) || remoteUrl.length < 10 || remoteUrl.length > 256) {
+      toast('Remote OTA manifest URL must be http/https and 10-256 chars', true);
+      return;
+    }
+  }
+  if (!(remoteMin >= 5 && remoteMin <= 1440)) {
+    toast('Remote OTA check interval must be 5-1440 min', true);
+    return;
+  }
+
   var slotsArr = [];
   for (var i=0;i<MAX_SLOTS;i++) {
     slotsArr.push({
@@ -1616,7 +1734,13 @@ async function saveConfig() {
     ssid: el('ssid').value,
     pass: el('wifipass').value,
     uiUser: el('uiUser').value.trim(),
-    uiPass: el('uiPass').value
+    uiPass: el('uiPass').value,
+    remoteOtaEnabled: remoteEnabled,
+    remoteOtaManifestUrl: remoteUrl,
+    remoteOtaCheckMin: remoteMin,
+    remoteOtaChannel: el('remoteOtaChannel').value,
+    remoteOtaAutoApply: el('remoteOtaAutoApply').checked,
+    remoteOtaAllowDowngrade: el('remoteOtaAllowDowngrade').checked
   };
   setAuthHeader();
   try {
@@ -1750,6 +1874,12 @@ void handleStatus() {
     doc["otaActive"] = otaActive;
     doc["otaProgress"] = otaProgressPct;
     doc["otaFailed"] = otaFailed;
+    doc["remoteOtaEnabled"] = remoteOtaEnabled;
+    doc["remoteOtaManifestUrl"] = remoteOtaManifestUrl;
+    doc["remoteOtaCheckMin"] = remoteOtaCheckMin;
+    doc["remoteOtaChannel"] = remoteOtaChannel;
+    doc["remoteOtaAutoApply"] = remoteOtaAutoApply;
+    doc["remoteOtaAllowDowngrade"] = remoteOtaAllowDowngrade;
     doc["heap"] = ESP.getFreeHeap();
     doc["fwVersion"] = FW_VERSION;
 
@@ -1812,6 +1942,45 @@ void handleConfigPost() {
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
     if (doc.containsKey("personalityEnabled")) cfgPersonalityEnabled = doc["personalityEnabled"].as<bool>();
     if (doc.containsKey("captionVerbosity")) cfgCaptionVerbosity = constrain(doc["captionVerbosity"].as<int>(), 0, 2);
+
+    if (doc.containsKey("remoteOtaEnabled")) remoteOtaEnabled = doc["remoteOtaEnabled"].as<bool>();
+    if (doc.containsKey("remoteOtaManifestUrl")) {
+        const char* url = doc["remoteOtaManifestUrl"].as<const char*>();
+        if (url && strlen(url) == 0) {
+            remoteOtaManifestUrl[0] = '\0';
+        } else if (!isHttpUrl(url)) {
+            server.send(400, "application/json", "{\"error\":\"remoteOtaManifestUrl must be http/https and 10-256 chars\"}");
+            return;
+        } else {
+            copyBounded(remoteOtaManifestUrl, sizeof(remoteOtaManifestUrl), url);
+        }
+    }
+    if (doc.containsKey("remoteOtaCheckMin")) {
+        int checkMin = doc["remoteOtaCheckMin"].as<int>();
+        if (checkMin < 5 || checkMin > 1440) {
+            server.send(400, "application/json", "{\"error\":\"remoteOtaCheckMin out of range (5-1440)\"}");
+            return;
+        }
+        remoteOtaCheckMin = checkMin;
+    }
+    if (doc.containsKey("remoteOtaChannel")) {
+        const char* channel = doc["remoteOtaChannel"].as<const char*>();
+        if (channel && strlen(channel) > 0) {
+            if (!isValidRemoteChannel(channel)) {
+                server.send(400, "application/json", "{\"error\":\"remoteOtaChannel must be stable or beta\"}");
+                return;
+            }
+            copyBounded(remoteOtaChannel, sizeof(remoteOtaChannel), channel);
+        } else {
+            copyBounded(remoteOtaChannel, sizeof(remoteOtaChannel), "stable");
+        }
+    }
+    if (doc.containsKey("remoteOtaAutoApply")) remoteOtaAutoApply = doc["remoteOtaAutoApply"].as<bool>();
+    if (doc.containsKey("remoteOtaAllowDowngrade")) remoteOtaAllowDowngrade = doc["remoteOtaAllowDowngrade"].as<bool>();
+    if (remoteOtaAutoApply && strncmp(remoteOtaManifestUrl, "https://", 8) != 0) {
+        server.send(400, "application/json", "{\"error\":\"remoteOtaAutoApply requires HTTPS manifest URL\"}");
+        return;
+    }
 
     if (doc.containsKey("ssid") && strlen(doc["ssid"].as<const char*>()) > 0)
         copyBounded(cfgSSID, sizeof(cfgSSID), doc["ssid"].as<const char*>());
@@ -1902,6 +2071,11 @@ void handleConfigPost() {
     cfgEmaSlow     = slots[0].cfg.emaSlow;
     cfgRsiPeriod   = slots[0].cfg.rsiPeriod;
     cfgHeikinAshi  = slots[0].cfg.heikinAshi;
+
+    if (remoteOtaEnabled && !isHttpUrl(remoteOtaManifestUrl)) {
+        server.send(400, "application/json", "{\"error\":\"remote OTA enabled but manifest URL is invalid\"}");
+        return;
+    }
 
     saveConfig();
     configTime(cfgTzOffset, 0, NTP_SERVER);
@@ -2076,6 +2250,257 @@ void handleUpdateUpload() {
     }
 }
 
+
+
+struct RemoteOtaManifest {
+    String version;
+    String url;
+    String sha256;
+    int size;
+    String board;
+    String channel;
+};
+
+void markRemoteOtaFailure(const char* reason) {
+    remoteOtaFailureCount++;
+    unsigned long baseDelay = (unsigned long)remoteOtaCheckMin * 60UL * 1000UL;
+    unsigned long backoff = baseDelay;
+    for (int i = 1; i < remoteOtaFailureCount && i < 6; i++) backoff *= 2UL;
+    unsigned long maxBackoff = 6UL * 60UL * 60UL * 1000UL;
+    if (backoff > maxBackoff) backoff = maxBackoff;
+    remoteOtaNextAllowedMs = millis() + backoff;
+    Serial.printf("Remote OTA failed: %s (attempt %d, backoff %lu ms)\n", reason, remoteOtaFailureCount, backoff);
+}
+
+void toLowerHex(char* s) {
+    if (!s) return;
+    for (size_t i = 0; s[i]; i++) {
+        s[i] = (char)tolower((unsigned char)s[i]);
+    }
+}
+
+bool parseRemoteManifest(const String& payload, RemoteOtaManifest& mf) {
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, payload)) return false;
+    if (!doc["version"].is<const char*>() || !doc["url"].is<const char*>() ||
+        !doc["sha256"].is<const char*>() || !doc["board"].is<const char*>()) return false;
+
+    mf.version = doc["version"].as<const char*>();
+    mf.url = doc["url"].as<const char*>();
+    mf.sha256 = doc["sha256"].as<const char*>();
+    mf.board = doc["board"].as<const char*>();
+    mf.size = doc["size"].is<int>() ? doc["size"].as<int>() : -1;
+    mf.channel = doc["channel"].is<const char*>() ? doc["channel"].as<const char*>() : "";
+
+    return isHttpUrl(mf.url.c_str()) && mf.sha256.length() == 64;
+}
+
+bool beginHttpForUrl(HTTPClient& http, const String& url) {
+    static WiFiClientSecure secure;
+    static WiFiClient plain;
+    if (url.startsWith("https://")) {
+        secure.setTimeout(15000);
+        if (REMOTE_OTA_TLS_FINGERPRINT[0] != '\0') {
+            secure.setFingerprint(REMOTE_OTA_TLS_FINGERPRINT);
+        } else {
+            secure.setInsecure();
+        }
+        return http.begin(secure, url);
+    }
+    plain.setTimeout(15000);
+    return http.begin(plain, url);
+}
+
+bool runRemoteOtaUpdate(const RemoteOtaManifest& mf) {
+    HTTPClient http;
+    if (!beginHttpForUrl(http, mf.url)) {
+        markRemoteOtaFailure("download begin failed");
+        return false;
+    }
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    if (code != 200) {
+        http.end();
+        markRemoteOtaFailure("download http status != 200");
+        return false;
+    }
+
+    int contentLen = http.getSize();
+    if (mf.size > 0 && contentLen > 0 && contentLen != mf.size) {
+        http.end();
+        markRemoteOtaFailure("size mismatch with manifest");
+        return false;
+    }
+
+    if (!Update.begin(mf.size > 0 ? (size_t)mf.size : UPDATE_SIZE_UNKNOWN)) {
+        http.end();
+        markRemoteOtaFailure("Update.begin failed");
+        return false;
+    }
+
+    otaActive = true;
+    otaFailed = false;
+    otaProgressPct = 0;
+    otaNeedsRender = true;
+
+    mbedtls_sha256_context shaCtx;
+    mbedtls_sha256_init(&shaCtx);
+    mbedtls_sha256_starts(&shaCtx, 0);
+
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buf[1024];
+    size_t writtenTotal = 0;
+    unsigned long started = millis();
+
+    while (http.connected() && (contentLen < 0 || (int)writtenTotal < contentLen)) {
+        size_t avail = stream->available();
+        if (!avail) {
+            delay(5);
+            if (millis() - started > 180000) break;
+            continue;
+        }
+        int n = stream->readBytes(buf, (avail > sizeof(buf)) ? sizeof(buf) : avail);
+        if (n <= 0) continue;
+        if (Update.write(buf, n) != (size_t)n) {
+            mbedtls_sha256_free(&shaCtx);
+            Update.abort();
+            http.end();
+            otaFailed = true;
+            otaActive = false;
+            otaNeedsRender = true;
+            markRemoteOtaFailure("Update.write failed");
+            return false;
+        }
+        mbedtls_sha256_update(&shaCtx, buf, n);
+        writtenTotal += (size_t)n;
+        if (mf.size > 0) {
+            otaProgressPct = constrain((int)((writtenTotal * 100UL) / (unsigned long)mf.size), 0, 100);
+            otaNeedsRender = true;
+        }
+    }
+
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&shaCtx, digest);
+    mbedtls_sha256_free(&shaCtx);
+
+    char digestHex[65];
+    for (int i = 0; i < 32; i++) sprintf(&digestHex[i * 2], "%02x", digest[i]);
+    digestHex[64] = '\0';
+
+    char expected[65];
+    copyBounded(expected, sizeof(expected), mf.sha256.c_str());
+    toLowerHex(expected);
+
+    if (strcmp(digestHex, expected) != 0) {
+        Update.abort();
+        http.end();
+        otaFailed = true;
+        otaActive = false;
+        otaNeedsRender = true;
+        markRemoteOtaFailure("sha256 mismatch");
+        return false;
+    }
+
+    if (mf.size > 0 && (int)writtenTotal != mf.size) {
+        Update.abort();
+        http.end();
+        otaFailed = true;
+        otaActive = false;
+        otaNeedsRender = true;
+        markRemoteOtaFailure("written size mismatch");
+        return false;
+    }
+
+    if (!Update.end(true)) {
+        http.end();
+        otaFailed = true;
+        otaActive = false;
+        otaNeedsRender = true;
+        markRemoteOtaFailure("Update.end failed");
+        return false;
+    }
+
+    http.end();
+    otaProgressPct = 100;
+    otaNeedsRender = true;
+    otaActive = false;
+    remoteOtaFailureCount = 0;
+    remoteOtaNextAllowedMs = 0;
+    Serial.println("Remote OTA update complete; rebooting");
+    delay(1000);
+    ESP.restart();
+    return true;
+}
+
+void remoteOtaTick() {
+    if (!remoteOtaEnabled || otaActive || WiFi.status() != WL_CONNECTED) return;
+    if (!isHttpUrl(remoteOtaManifestUrl)) return;
+
+    unsigned long now = millis();
+    unsigned long intervalMs = (unsigned long)remoteOtaCheckMin * 60UL * 1000UL;
+    if (lastRemoteOtaCheckMs != 0 && now - lastRemoteOtaCheckMs < intervalMs) return;
+    if (remoteOtaNextAllowedMs != 0 && now < remoteOtaNextAllowedMs) return;
+    lastRemoteOtaCheckMs = now;
+
+    HTTPClient http;
+    String manifestUrl(remoteOtaManifestUrl);
+    if (!beginHttpForUrl(http, manifestUrl)) {
+        markRemoteOtaFailure("manifest begin failed");
+        return;
+    }
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    if (code != 200) {
+        http.end();
+        markRemoteOtaFailure("manifest http status != 200");
+        return;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    RemoteOtaManifest mf;
+    if (!parseRemoteManifest(payload, mf)) {
+        markRemoteOtaFailure("manifest parse/validation failed");
+        return;
+    }
+
+    if (mf.url.startsWith("http://") && remoteOtaAutoApply) {
+        markRemoteOtaFailure("auto-apply requires https artifact URL");
+        return;
+    }
+
+    if (mf.board != String(FW_BOARD_ID)) {
+        Serial.printf("Remote OTA skipped: board mismatch (%s != %s)\n", mf.board.c_str(), FW_BOARD_ID);
+        remoteOtaFailureCount = 0;
+        return;
+    }
+
+    if (mf.channel.length() > 0 && mf.channel != String(remoteOtaChannel)) {
+        Serial.printf("Remote OTA skipped: channel mismatch (%s != %s)\n", mf.channel.c_str(), remoteOtaChannel);
+        remoteOtaFailureCount = 0;
+        return;
+    }
+
+    int verCmp = compareSemver(mf.version.c_str(), FW_VERSION);
+    if (verCmp < 0 && !remoteOtaAllowDowngrade) {
+        Serial.printf("Remote OTA downgrade skipped (%s < %s)\n", mf.version.c_str(), FW_VERSION);
+        remoteOtaFailureCount = 0;
+        return;
+    }
+    if (verCmp == 0) {
+        remoteOtaFailureCount = 0;
+        return;
+    }
+
+    if (!remoteOtaAutoApply) {
+        Serial.printf("Remote OTA available: %s (auto-apply disabled)\n", mf.version.c_str());
+        remoteOtaFailureCount = 0;
+        return;
+    }
+
+    runRemoteOtaUpdate(mf);
+}
 
 void setupWebServer() {
     server.on("/",          HTTP_GET,  handleRoot);
@@ -3524,6 +3949,9 @@ void loop() {
             Serial.println("STA retry failed, AP still active");
         }
     }
+
+    // Remote OTA polling
+    remoteOtaTick();
 
     // Normal refresh cycle — only when we have WiFi
     unsigned long interval = (unsigned long)cfgRefreshMin * 60UL * 1000UL;
