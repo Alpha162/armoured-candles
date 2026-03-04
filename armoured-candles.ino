@@ -114,6 +114,23 @@ int      cfgEmaFast       = 9;
 int      cfgEmaSlow       = 21;
 int      cfgRsiPeriod     = 14;
 bool     cfgHeikinAshi    = false;
+bool     cfgPersonalityEnabled = true;
+int      cfgCaptionVerbosity   = 1;  // 0=minimal, 1=short, 2=detailed
+
+enum MoodId {
+    MOOD_VERY_BEARISH = 0,
+    MOOD_BEARISH      = 1,
+    MOOD_NEUTRAL      = 2,
+    MOOD_BULLISH      = 3,
+    MOOD_VERY_BULLISH = 4
+};
+
+struct MoodInfo {
+    MoodId id;
+    const char* caption;
+    const char* style;
+    float aggregatePct;
+};
 
 // ─── STATE ─────────────────────────────────────────────
 unsigned long lastRefreshMs    = 0;
@@ -152,6 +169,7 @@ static float  rsiVal[MAX_CANDLES];
 
 // ─── CHART SLOTS ────────────────────────────────────────
 static ChartSlot slots[MAX_SLOTS];
+static MoodInfo currentMood = {MOOD_NEUTRAL, "STABLE", "none", 0.0f};
 
 // ─── OBJECTS ────────────────────────────────────────────
 Epd       epd;
@@ -163,6 +181,8 @@ void setupWebServer();
 void renderOtaProgressScreen(int pct, bool failed);
 void updateOtaDisplay(bool forceFullRefresh);
 bool authenticateRequest();
+MoodInfo getAggregateMood();
+void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen);
 
 // ═══════════════════════════════════════════════════════
 // 5x7 FONT
@@ -650,6 +670,8 @@ void loadConfig() {
     cfgPartialPct   = prefs.getInt("partialPct", cfgPartialPct);
     cfgLayout       = prefs.getInt("layout", 1);
     if (cfgLayout < 1 || cfgLayout > 4) cfgLayout = 1;
+    cfgPersonalityEnabled = prefs.getBool("personality", true);
+    cfgCaptionVerbosity = constrain(prefs.getInt("captionVerb", 1), 0, 2);
 
     // Initialize all slots with defaults
     for (int i = 0; i < MAX_SLOTS; i++) {
@@ -733,6 +755,8 @@ void saveConfig() {
     prefs.putInt("fullRefEv", cfgFullRefEvery);
     prefs.putInt("partialPct", cfgPartialPct);
     prefs.putInt("layout", cfgLayout);
+    prefs.putBool("personality", cfgPersonalityEnabled);
+    prefs.putInt("captionVerb", cfgCaptionVerbosity);
 
     for (int i = 0; i < MAX_SLOTS; i++) {
         saveSlotConfig(i);
@@ -997,6 +1021,16 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         <div class="field">
           <label>Partial threshold %</label>
           <input type="number" id="partialPct" min="10" max="100" value="40">
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="field">
+          <label>Personality HUD</label>
+          <label class="toggle"><input type="checkbox" id="personalityEnabled" checked><span class="slider"></span></label>
+        </div>
+        <div class="field">
+          <label>Caption verbosity</label>
+          <select id="captionVerbosity"><option value="0">Minimal</option><option value="1" selected>Short</option><option value="2">Detailed</option></select>
         </div>
       </div>
       <div class="field">
@@ -1344,10 +1378,11 @@ function getActiveSlotSummary(slots, layout) {
   return {active:active, tracked:tracked, up:up, down:down, flat:flat};
 }
 
-function setCryptoPill(slots, layout) {
+function setCryptoPill(slots, layout, mood) {
   var summary = getActiveSlotSummary(slots || [], layout);
   var text = 'Crypto ' + summary.tracked + '/' + summary.active + ' • ▲' + summary.up + ' ▼' + summary.down;
   if (summary.flat > 0) text += ' ▬' + summary.flat;
+  if (mood && mood.caption) text += ' • ' + mood.caption;
   var cls = 'pill';
   if (summary.tracked === 0) cls += ' warn';
   else if (summary.down > summary.up) cls += ' neg';
@@ -1383,6 +1418,8 @@ async function loadConfig() {
     el('tzOffset').value = String(d.tzOffset || 0);
     el('fullRefEvery').value = d.fullRefEvery || 10;
     el('partialPct').value = d.partialPct || 40;
+    el('personalityEnabled').checked = d.personalityEnabled !== false;
+    el('captionVerbosity').value = String((d.captionVerbosity===0||d.captionVerbosity===2)?d.captionVerbosity:1);
     el('ssid').value = d.ssid || '';
     el('uiUser').value = d.uiUser || '';
     el('uiPass').value = '';
@@ -1414,7 +1451,7 @@ async function loadConfig() {
     else if (d.rssi) { el('pillWifi').textContent='WiFi '+d.rssi+'dBm'; el('pillWifi').className='pill live'; }
 
     // Active panel crypto + runtime + memory pills
-    setCryptoPill(slots, d.layout);
+    setCryptoPill(slots, d.layout, d.mood || null);
 
     var uptimeTxt = d.uptime || '--';
     if (d.fails > 0) {
@@ -1457,6 +1494,8 @@ async function saveConfig() {
     tzOffset: parseInt(el('tzOffset').value) || 0,
     fullRefEvery: parseInt(el('fullRefEvery').value) || 10,
     partialPct: parseInt(el('partialPct').value) || 40,
+    personalityEnabled: el('personalityEnabled').checked,
+    captionVerbosity: parseInt(el('captionVerbosity').value) || 0,
     ssid: el('ssid').value,
     pass: el('wifipass').value,
     uiUser: el('uiUser').value.trim(),
@@ -1571,6 +1610,8 @@ void handleStatus() {
     doc["tzOffset"] = cfgTzOffset;
     doc["fullRefEvery"] = cfgFullRefEvery;
     doc["partialPct"] = cfgPartialPct;
+    doc["personalityEnabled"] = cfgPersonalityEnabled;
+    doc["captionVerbosity"] = cfgCaptionVerbosity;
 
     bool canViewSensitive = !authEnabled() || server.authenticate(cfgUiUser, cfgUiPass);
     doc["ssid"] = canViewSensitive ? cfgSSID : "";
@@ -1590,6 +1631,13 @@ void handleStatus() {
     doc["otaFailed"] = otaFailed;
     doc["heap"] = ESP.getFreeHeap();
     doc["fwVersion"] = FW_VERSION;
+
+    currentMood = getAggregateMood();
+    JsonObject mood = doc.createNestedObject("mood");
+    mood["id"] = (int)currentMood.id;
+    mood["caption"] = currentMood.caption;
+    mood["style"] = currentMood.style;
+    mood["aggregatePct"] = currentMood.aggregatePct;
 
     // Per-slot config array
     JsonArray slotsArr = doc.createNestedArray("slots");
@@ -1637,6 +1685,8 @@ void handleConfigPost() {
     if (doc.containsKey("tzOffset"))    cfgTzOffset     = doc["tzOffset"].as<int>();
     if (doc.containsKey("fullRefEvery"))cfgFullRefEvery = constrain(doc["fullRefEvery"].as<int>(), 1, 50);
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
+    if (doc.containsKey("personalityEnabled")) cfgPersonalityEnabled = doc["personalityEnabled"].as<bool>();
+    if (doc.containsKey("captionVerbosity")) cfgCaptionVerbosity = constrain(doc["captionVerbosity"].as<int>(), 0, 2);
 
     if (doc.containsKey("ssid") && strlen(doc["ssid"].as<const char*>()) > 0)
         copyBounded(cfgSSID, sizeof(cfgSSID), doc["ssid"].as<const char*>());
@@ -2639,13 +2689,99 @@ void drawTrendPips(int x, int y, int count, int filled, int pipSize = 4, int gap
     }
 }
 
+static const uint8_t moodFaceBearish[] PROGMEM = {
+    0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0x42, 0x3C
+};
+
+static const uint8_t moodFaceNeutral[] PROGMEM = {
+    0x3C, 0x42, 0xA5, 0x81, 0xBD, 0x81, 0x42, 0x3C
+};
+
+static const uint8_t moodFaceBullish[] PROGMEM = {
+    0x3C, 0x42, 0xA5, 0x81, 0x99, 0xA5, 0x42, 0x3C
+};
+
+MoodInfo getAggregateMood() {
+    int active = constrain(cfgLayout, 1, MAX_SLOTS);
+    int tracked = 0;
+    float sum = 0.0f;
+
+    for (int i = 0; i < active; i++) {
+        if (slots[i].candleCount < 2) continue;
+        tracked++;
+        sum += slots[i].lastPctChange;
+    }
+
+    float aggPct = (tracked > 0) ? (sum / tracked) : 0.0f;
+    MoodInfo mood = {MOOD_NEUTRAL, "STABLE", "none", aggPct};
+
+    if (aggPct <= -1.25f) mood.id = MOOD_VERY_BEARISH;
+    else if (aggPct <= -0.35f) mood.id = MOOD_BEARISH;
+    else if (aggPct >= 1.25f) mood.id = MOOD_VERY_BULLISH;
+    else if (aggPct >= 0.35f) mood.id = MOOD_BULLISH;
+    else mood.id = MOOD_NEUTRAL;
+
+    if (cfgCaptionVerbosity == 0) {
+        if (mood.id == MOOD_VERY_BEARISH) mood.caption = "PANIC";
+        else if (mood.id == MOOD_BEARISH) mood.caption = "DOWN";
+        else if (mood.id == MOOD_BULLISH) mood.caption = "UP";
+        else if (mood.id == MOOD_VERY_BULLISH) mood.caption = "RIP";
+        else mood.caption = "FLAT";
+    } else if (cfgCaptionVerbosity == 2) {
+        if (mood.id == MOOD_VERY_BEARISH) mood.caption = "AGGRESSIVE SELL PRESSURE";
+        else if (mood.id == MOOD_BEARISH) mood.caption = "BEARS IN CONTROL";
+        else if (mood.id == MOOD_BULLISH) mood.caption = "BULLS BUILDING";
+        else if (mood.id == MOOD_VERY_BULLISH) mood.caption = "STRONG UPSIDE MOMENTUM";
+        else mood.caption = "BALANCED FLOW";
+    } else {
+        if (mood.id == MOOD_VERY_BEARISH) mood.caption = "VERY BEARISH";
+        else if (mood.id == MOOD_BEARISH) mood.caption = "BEARISH";
+        else if (mood.id == MOOD_BULLISH) mood.caption = "BULLISH";
+        else if (mood.id == MOOD_VERY_BULLISH) mood.caption = "VERY BULLISH";
+        else mood.caption = "NEUTRAL";
+    }
+
+    if (mood.id == MOOD_VERY_BEARISH || mood.id == MOOD_VERY_BULLISH) mood.style = "bold";
+    else if (mood.id == MOOD_BEARISH || mood.id == MOOD_BULLISH) mood.style = "blink";
+    else mood.style = "none";
+
+    return mood;
+}
+
+void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen) {
+    if (!cfgPersonalityEnabled) return;
+
+    int hudH = fullScreen ? 14 : 12;
+    int hudW = min(vp.w - 6, fullScreen ? 260 : 182);
+    int hudX = vp.x + 3;
+    int hudY = vp.y + 2;
+
+    drawRect(hudX, hudY, hudW, hudH);
+    if (strcmp(mood.style, "bold") == 0) {
+        drawRect(hudX + 1, hudY + 1, hudW - 2, hudH - 2);
+    } else if (strcmp(mood.style, "blink") == 0) {
+        hLineDash(hudX + 1, hudX + hudW - 2, hudY + hudH - 2, 2, 2);
+    }
+
+    const uint8_t* faceBmp = moodFaceNeutral;
+    if (mood.id == MOOD_VERY_BEARISH || mood.id == MOOD_BEARISH) faceBmp = moodFaceBearish;
+    else if (mood.id == MOOD_BULLISH || mood.id == MOOD_VERY_BULLISH) faceBmp = moodFaceBullish;
+
+    drawBitmapScaledFromProgmem(faceBmp, 8, 8, hudX + 3, hudY + 2, 1);
+
+    char hudText[48];
+    snprintf(hudText, sizeof(hudText), "%s %.2f%%", mood.caption, mood.aggregatePct);
+    drawString(hudX + 14, hudY + 3, hudText, 1);
+}
+
 void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     const SlotConfig& sc = slot.cfg;
     bool isFullScreen = (vp.w >= 700 && vp.h >= 400);
     bool isHalf = (vp.w >= 700 && !isFullScreen);
 
     // Adaptive layout values based on viewport size
-    int mT = isFullScreen ? 35 : 18;
+    int moodReserve = cfgPersonalityEnabled ? (isFullScreen ? 16 : 14) : 0;
+    int mT = (isFullScreen ? 35 : 18) + moodReserve;
     int mB = isFullScreen ? 25 : 12;
     int mL = (vp.w >= 600) ? 10 : 6;
     int mR = isFullScreen ? 85 : (vp.w >= 500 ? 55 : 45);
@@ -2713,14 +2849,14 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
         snprintf(title, sizeof(title), "%s:%s/%s  %s%s", exLabel, sc.coin, sc.quote, sc.interval,
                  sc.heikinAshi ? "  HA" : "");
     }
-    drawString(vp.x + mL, vp.y + (isFullScreen ? 5 : 3), title, titleScale);
+    drawString(vp.x + mL, vp.y + (isFullScreen ? 5 : 3) + moodReserve, title, titleScale);
 
     // Legend line (EMA/RSI info) — only if there's room
     if (isFullScreen) {
         char legend[48];
         snprintf(legend, sizeof(legend), "EMA%d/EMA%d  RSI%d:%.0f",
                  sc.emaFast, sc.emaSlow, sc.rsiPeriod, slot.rsiVal[slot.candleCount - 1]);
-        drawString(vp.x + mL + strlen(title) * 12 + 20, vp.y + 12, legend, 1);
+        drawString(vp.x + mL + strlen(title) * 12 + 20, vp.y + 12 + moodReserve, legend, 1);
     }
 
     // Price + pct on the right
@@ -2743,15 +2879,16 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     }
 
     int priceRight = blocksX - 4;
-    drawStringR(priceRight, vp.y + (isFullScreen ? 3 : 3), priceStr, priceScale);
+    drawStringR(priceRight, vp.y + 3 + moodReserve, priceStr, priceScale);
 
     // IP address — only in full-screen single chart mode
     if (isFullScreen) {
         char ipStr[32];
         snprintf(ipStr, sizeof(ipStr), "%s", WiFi.localIP().toString().c_str());
-        drawStringR(priceRight - 6, vp.y + 22, ipStr, 1);
+        drawStringR(priceRight - 6, vp.y + 22 + moodReserve, ipStr, 1);
     }
 
+    drawMoodHud(vp, currentMood, isFullScreen);
     hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
 
     // ── Price grid ──
@@ -2918,6 +3055,7 @@ void renderAllCharts() {
         }
     }
 
+    currentMood = getAggregateMood();
     for (int i = 0; i < activeSlots; i++) {
         renderSlotChart(vps[i], slots[i]);
     }
