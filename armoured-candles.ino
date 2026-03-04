@@ -2485,21 +2485,6 @@ static bool readJsonFloat(JsonVariantConst value, float& out) {
     return false;
 }
 
-static bool readJsonU64(JsonVariantConst value, uint64_t& out) {
-    if (value.isNull()) return false;
-    if (value.is<const char*>()) {
-        const char* s = value.as<const char*>();
-        if (!s || !*s) return false;
-        out = strtoull(s, nullptr, 10);
-        return out != 0;
-    }
-    if (value.is<uint64_t>() || value.is<unsigned long>() || value.is<unsigned int>() || value.is<int>() || value.is<long>()) {
-        out = value.as<uint64_t>();
-        return out != 0;
-    }
-    return false;
-}
-
 // ── Poloniex ─────────────────────────────────────────
 bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     char symbol[32];
@@ -2545,30 +2530,21 @@ bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     }
 
     for (int i = skip; i < total && candleCount < numCandles; i++) {
-        JsonVariant cv = arr[i];
-
+        JsonObject c = arr[i];
         float o, h, l, cl, v;
-        uint64_t t;
-        bool ok = false;
-
-        if (cv.is<JsonObject>()) {
-            JsonObject c = cv.as<JsonObject>();
-            ok = readJsonFloat(c["open"], o) && readJsonFloat(c["high"], h) && readJsonFloat(c["low"], l) &&
-                 readJsonFloat(c["close"], cl) &&
-                 (readJsonFloat(c["quantity"], v) || readJsonFloat(c["amount"], v)) &&
-                 readJsonU64(c["startTime"], t);
-        } else if (cv.is<JsonArray>()) {
-            // Alternate payload shape: [startTime, open, high, low, close, amount, quantity, ...]
-            JsonArray c = cv.as<JsonArray>();
-            ok = (c.size() >= 7) &&
-                 readJsonU64(c[0], t) &&
-                 readJsonFloat(c[1], o) && readJsonFloat(c[2], h) && readJsonFloat(c[3], l) &&
-                 readJsonFloat(c[4], cl) &&
-                 (readJsonFloat(c[6], v) || readJsonFloat(c[5], v));
+        if (!readJsonFloat(c["open"], o) || !readJsonFloat(c["high"], h) || !readJsonFloat(c["low"], l) ||
+            !readJsonFloat(c["close"], cl) || !readJsonFloat(c["quantity"], v)) {
+            Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
+            continue;
         }
 
-        if (!ok) {
-            Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
+        uint64_t t = c["startTime"].as<uint64_t>();
+        if (t == 0 && c["startTime"].is<const char*>()) {
+            const char* ts = c["startTime"].as<const char*>();
+            if (ts && *ts) t = strtoull(ts, nullptr, 10);
+        }
+        if (t == 0) {
+            Serial.printf("Poloniex: skipping candle with invalid startTime at index %d\n", i);
             continue;
         }
 
