@@ -32,6 +32,18 @@ Compared to early versions, the project now includes:
 - **mDNS + AP fallback setup flow**
 - **In-browser OTA firmware upload/install**
 
+## Firmware Version on Splash
+
+The boot splash shows `Version <FW_VERSION>`.
+
+- If you do not pass a build flag, firmware defaults to `FW_VERSION="dev"`.
+- To override in PlatformIO, add for example:
+
+```ini
+build_flags =
+  -DFW_VERSION="v1.2.3"
+```
+
 ## Hardware
 
 | Component | Model |
@@ -215,7 +227,7 @@ armoured-candles/
 ├── armoured-candles.ino  # Main firmware: UI, WiFi, APIs, charts + indicators
 ├── epd7in5_V2.cpp/.h     # Waveshare 7.5" V2 driver (full + partial refresh)
 ├── epdif.cpp/.h          # Low-level SPI transport glue
-├── splash_image.h        # Boot splash bitmap
+├── armoured_bird_64x64_bitmap.h  # Compact 1-bit logo bitmap used for boot splash
 └── docs/
     ├── splash_preview.png
     ├── panel_single.svg

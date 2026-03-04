@@ -31,9 +31,13 @@
 #include <Update.h>
 #include <ctype.h>
 #include "epd7in5_V2.h"
-#include "splash_image.h"
+#include "armoured_bird_64x64_bitmap.h"
 
 // ─── COMPILE-TIME CONSTANTS ────────────────────────────
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+
 #define MAX_CANDLES     200
 #define MAX_SLOTS       4
 #define SCR_W           800
@@ -333,6 +337,26 @@ void drawString(int x, int y, const char* str, int scale = 1) {
 void drawStringR(int x, int y, const char* str, int scale = 1) {
     int spacing = 6 * scale;
     drawString(x - strlen(str) * spacing, y, str, scale);
+}
+
+void drawBitmapScaledFromProgmem(const uint8_t* bmp, int bmpW, int bmpH, int x0, int y0, int scale) {
+    if (scale < 1) scale = 1;
+    int bytesPerRow = (bmpW + 7) / 8;
+
+    for (int y = 0; y < bmpH; y++) {
+        for (int x = 0; x < bmpW; x++) {
+            int byteIndex = y * bytesPerRow + (x >> 3);
+            uint8_t byteVal = pgm_read_byte(bmp + byteIndex);
+            bool isBlack = (byteVal & (0x80 >> (x & 7))) != 0;
+            if (!isBlack) continue;
+
+            if (scale == 1) {
+                setPixel(x0 + x, y0 + y, true);
+            } else {
+                fillRect(x0 + x * scale, y0 + y * scale, scale, scale, true);
+            }
+        }
+    }
 }
 
 void drawLine(int x0, int y0, int x1, int y1, bool dashed = false) {
@@ -2923,12 +2947,33 @@ void renderChart() {
 // ═══════════════════════════════════════════════════════
 
 void showSplash() {
-    // Copy splash from PROGMEM into framebuffer
-    memcpy_P(framebuf, splash_image, BUF_SIZE);
+    bufClear();
+
+    const int logoScale = 4;
+    const int logoW = ARMOURED_BIRD_64_WIDTH * logoScale;
+    const int logoH = ARMOURED_BIRD_64_HEIGHT * logoScale;
+    const int logoX = (SCR_W - logoW) / 2;
+    const int logoY = 56;
+
+    drawBitmapScaledFromProgmem(armoured_bird_64x64,
+                                ARMOURED_BIRD_64_WIDTH,
+                                ARMOURED_BIRD_64_HEIGHT,
+                                logoX, logoY, logoScale);
+
+    const char* title = "Armoured-Candles";
+    const int titleScale = 3;
+    int titleW = (int)strlen(title) * 6 * titleScale;
+    drawString((SCR_W - titleW) / 2, logoY + logoH + 34, title, titleScale);
+
+    char versionLine[32];
+    snprintf(versionLine, sizeof(versionLine), "Version %s", FW_VERSION);
+    int versionW = (int)strlen(versionLine) * 6 * 2;
+    drawString((SCR_W - versionW) / 2, logoY + logoH + 78, versionLine, 2);
+
     memset(oldbuf, 0xFF, BUF_SIZE);
     epd.DisplayFrame(framebuf);
     memcpy(oldbuf, framebuf, BUF_SIZE);
-    Serial.println("Splash screen displayed");
+    Serial.printf("Splash screen displayed (%s)\n", FW_VERSION);
 }
 
 void doRefreshCycle(bool fullRefresh) {
