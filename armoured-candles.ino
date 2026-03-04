@@ -203,6 +203,7 @@ void updateOtaDisplay(bool forceFullRefresh);
 bool authenticateRequest();
 MoodInfo getAggregateMood();
 void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen);
+void handlePoloniexMarkets();
 
 // ═══════════════════════════════════════════════════════
 // 5x7 FONT
@@ -1426,9 +1427,9 @@ async function fetchPairsForSlot(idx, ex) {
       var pairs=d.result||{},seen={};
       Object.keys(pairs).forEach(function(k){ var p=pairs[k]; var q=(p.quote||'').replace(/^Z/,''); if(q===quote){var b=(p.base||'').replace(/^X/,'');if(!seen[b]){seen[b]=1;list.push(b);}}});
     } else if (ex === 'poloniex') {
-      var r = await fetch('https://api.poloniex.com/markets');
+      var r = await authFetch('/api/poloniex/markets');
       var d = await r.json();
-      list = d.filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);}).map(function(m){return m.symbol.split('_')[0];});
+      list = (d||[]).filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);}).map(function(m){return m.symbol.split('_')[0];});
     }
     list.sort();
     list = list.filter(function(v,i,a){return i===0||v!==a[i-1];});
@@ -1965,6 +1966,25 @@ void handleDisplayBMP() {
     }
 }
 
+void handlePoloniexMarkets() {
+    if (!authenticateRequest()) return;
+
+    HTTPClient http;
+    http.begin("https://api.poloniex.com/markets");
+    http.setTimeout(12000);
+
+    int httpCode = http.GET();
+    if (httpCode != 200) {
+        http.end();
+        server.send(502, "application/json", "{\"error\":\"poloniex unavailable\"}");
+        return;
+    }
+
+    String payload = http.getString();
+    http.end();
+    server.send(200, "application/json", payload);
+}
+
 // ── OTA firmware update via browser upload ──
 
 
@@ -2063,6 +2083,7 @@ void setupWebServer() {
     server.on("/api/refresh",HTTP_POST,handleRefresh);
     server.on("/api/restart",HTTP_POST,handleRestart);
     server.on("/api/display",HTTP_GET, handleDisplayBMP);
+    server.on("/api/poloniex/markets",HTTP_GET, handlePoloniexMarkets);
     server.on("/api/update/arm", HTTP_POST, handleUpdateArm);
     server.on("/api/update", HTTP_POST, handleUpdateResult, handleUpdateUpload);
     server.begin();
@@ -2877,10 +2898,12 @@ MoodInfo getAggregateMood() {
 void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen) {
     if (!cfgPersonalityEnabled) return;
 
-    int hudH = fullScreen ? 14 : 12;
-    int hudW = min(vp.w - 6, fullScreen ? 260 : 182);
+    int hudH = fullScreen ? 24 : 18;
+    int hudW = min(vp.w - 6, fullScreen ? 380 : 250);
     int hudX = vp.x + 3;
     int hudY = vp.y + 2;
+    int faceScale = fullScreen ? 2 : 1;
+    int faceW = 8 * faceScale;
 
     drawRect(hudX, hudY, hudW, hudH);
     if (strcmp(mood.style, "bold") == 0) {
@@ -2893,11 +2916,11 @@ void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen) {
     if (mood.id == MOOD_VERY_BEARISH || mood.id == MOOD_BEARISH) faceBmp = moodFaceBearish;
     else if (mood.id == MOOD_BULLISH || mood.id == MOOD_VERY_BULLISH) faceBmp = moodFaceBullish;
 
-    drawBitmapScaledFromProgmem(faceBmp, 8, 8, hudX + 3, hudY + 2, 1);
+    drawBitmapScaledFromProgmem(faceBmp, 8, 8, hudX + 3, hudY + (hudH - faceW) / 2, faceScale);
 
     char hudText[48];
     snprintf(hudText, sizeof(hudText), "%s %.2f%%", mood.caption, mood.aggregatePct);
-    drawString(hudX + 14, hudY + 3, hudText, 1);
+    drawString(hudX + 8 + faceW, hudY + (fullScreen ? 8 : 6), hudText, 1);
 }
 
 void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
@@ -2906,14 +2929,14 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     bool isHalf = (vp.w >= 700 && !isFullScreen);
 
     // Adaptive layout values based on viewport size
-    int moodReserve = cfgPersonalityEnabled ? (isFullScreen ? 16 : 14) : 0;
-    int mT = (isFullScreen ? 35 : 18) + moodReserve;
-    int mB = isFullScreen ? 25 : 12;
-    int mL = (vp.w >= 600) ? 10 : 6;
-    int mR = isFullScreen ? 85 : (vp.w >= 500 ? 55 : 45);
-    int rH = isFullScreen ? 45 : 25;
-    int vH = isFullScreen ? 30 : 18;
-    int gp = isFullScreen ? 5 : 3;
+    int moodReserve = cfgPersonalityEnabled ? (isFullScreen ? 26 : 20) : 0;
+    int mT = (isFullScreen ? 31 : 16) + moodReserve;
+    int mB = isFullScreen ? 18 : 10;
+    int mL = (vp.w >= 600) ? 9 : 5;
+    int mR = isFullScreen ? 72 : (vp.w >= 500 ? 48 : 40);
+    int rH = isFullScreen ? 38 : 22;
+    int vH = isFullScreen ? 24 : 14;
+    int gp = isFullScreen ? 4 : 2;
     int titleScale = isFullScreen ? 2 : 1;
     int priceScale = isFullScreen ? 2 : 1;
 
@@ -3030,10 +3053,11 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
         else snprintf(eventText, sizeof(eventText), "%s", slot.lastEvent.message);
 
         int stripX = vp.x + mL;
-        int stripY = vp.y + mT + 2;
+        int stripY = vp.y + mT + 1;
         int stripW = chartW - 2;
+        int stripH = isFullScreen ? 12 : 10;
         if (stripW > 60) {
-            drawRect(stripX, stripY, stripW, 9);
+            drawRect(stripX, stripY, stripW, stripH);
             int maxChars = (stripW - 6) / 6;
             if (maxChars > 4) {
                 char clipped[96];
@@ -3050,7 +3074,7 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
                         clipped[maxChars] = '\0';
                     }
                 }
-                drawString(stripX + 3, stripY + 1, clipped, 1);
+                drawString(stripX + 3, stripY + (isFullScreen ? 3 : 2), clipped, 1);
             }
         }
     }
