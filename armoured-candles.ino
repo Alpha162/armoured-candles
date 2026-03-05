@@ -1882,6 +1882,8 @@ void handleStatus() {
     doc["remoteOtaAllowDowngrade"] = remoteOtaAllowDowngrade;
     doc["heap"] = ESP.getFreeHeap();
     doc["fwVersion"] = FW_VERSION;
+    doc["gitSha"] = FW_GIT_SHA;
+    doc["buildTimestamp"] = FW_BUILD_TIMESTAMP;
 
     currentMood = getAggregateMood();
     JsonObject mood = doc.createNestedObject("mood");
