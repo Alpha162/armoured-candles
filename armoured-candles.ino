@@ -38,6 +38,14 @@
 #define FW_VERSION "v1.0.0"
 #endif
 
+#ifndef FW_GIT_SHA
+#define FW_GIT_SHA "dev"
+#endif
+
+#ifndef FW_BUILD_TIMESTAMP
+#define FW_BUILD_TIMESTAMP __DATE__ " " __TIME__
+#endif
+
 #define MAX_CANDLES     200
 #define MAX_SLOTS       4
 #define SCR_W           800
@@ -1752,6 +1760,8 @@ void handleStatus() {
     doc["otaFailed"] = otaFailed;
     doc["heap"] = ESP.getFreeHeap();
     doc["fwVersion"] = FW_VERSION;
+    doc["gitSha"] = FW_GIT_SHA;
+    doc["buildTimestamp"] = FW_BUILD_TIMESTAMP;
 
     currentMood = getAggregateMood();
     JsonObject mood = doc.createNestedObject("mood");

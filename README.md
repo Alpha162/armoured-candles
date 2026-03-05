@@ -36,13 +36,30 @@ This README reflects the current firmware feature set after recent improvements,
 
 The boot splash shows `Version <FW_VERSION>`.
 
-- If you do not pass a build flag, firmware defaults to `FW_VERSION="v1.0.0"`.
-- To override in PlatformIO, add for example:
+This repo uses `version.txt` as the version source of truth for CI builds and release automation.
+
+- `version.txt` currently stores a semantic version string (for example `v1.0.0`).
+- The `version-bump` workflow increments the patch component on eligible merges and commits the new value.
+- Build workflows read `version.txt` and pass it to compilation as `-DFW_VERSION="<version>"`.
+- Manual Arduino IDE builds still work without CI flags and fall back to the firmware default (`FW_VERSION="v1.0.0"`).
+
+You can still override manually in PlatformIO/CLI builds:
 
 ```ini
 build_flags =
   -DFW_VERSION="v1.0.1"
+  -DFW_GIT_SHA="local"
+  -DFW_BUILD_TIMESTAMP="manual"
 ```
+
+## CI Versioning + Release Automation
+
+- `.github/workflows/version-bump.yml` runs on pushes to `main`, skips bot/`[skip bump]` commits, and only bumps on merge commits.
+- The bump workflow updates `version.txt`, commits with bot identity, and pushes back to `main`.
+- `.github/workflows/build-release.yml` runs after a successful bump (or manually), compiles firmware, then uploads:
+  - `armoured-candles-<version>.bin`
+  - `manifest.json` (`version`, `url`, `sha256`, `size`, `board`)
+- Release assets are published to a GitHub release tag `fw-<version>` for OTA polling clients.
 
 ## Hardware
 
@@ -210,7 +227,7 @@ Per-panel defaults:
 ## HTTP Endpoints
 
 - `GET /` — Web UI
-- `GET /api/status` — current runtime + config snapshot (includes `fwVersion`)
+- `GET /api/status` — current runtime + config snapshot (includes `fwVersion`, `gitSha`, and `buildTimestamp`)
 - `POST /api/config` — save config
 - `POST /api/refresh` — force redraw/update
 - `POST /api/restart` — reboot device
