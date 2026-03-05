@@ -3727,25 +3727,60 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     }
 }
 
+void drawGlobalFooter(int y, int h) {
+    if (h < 8) return;
+
+    hLine(0, SCR_W - 1, y);
+
+    time_t now = time(nullptr);
+    struct tm* t = gmtime(&now);
+    char tsStr[32] = "UTC --:--";
+    if (t) {
+        snprintf(tsStr, sizeof(tsStr), "UTC %02d:%02d", t->tm_hour, t->tm_min);
+    }
+
+    char netStr[80];
+    if (WiFi.status() == WL_CONNECTED) {
+        snprintf(netStr, sizeof(netStr), "%s  %s.local", WiFi.localIP().toString().c_str(), MDNS_HOST);
+    } else {
+        snprintf(netStr, sizeof(netStr), "%s  AP mode", MDNS_HOST);
+    }
+
+    int textY = y + max(1, h - 9);
+    drawString(6, textY, netStr, 1);
+    drawStringR(SCR_W - 6, textY, tsStr, 1);
+}
+
 // ── Layout orchestrator ──
 void renderAllCharts() {
     bufClear();
 
     int activeSlots = cfgLayout;
     Viewport vps[MAX_SLOTS];
+    const int footerH = (cfgLayout == 1) ? 0 : 12;
+    const int chartAreaH = SCR_H - footerH;
 
     if (cfgLayout == 1) {
-        vps[0] = {0, 0, 800, 480};
+        vps[0] = {0, 0, SCR_W, SCR_H};
     } else if (cfgLayout == 2) {
-        vps[0] = {0, 0, 800, 238};
-        vps[1] = {0, 242, 800, 238};
+        int rowGap = 4;
+        int rowH = (chartAreaH - rowGap) / 2;
+        int y2 = rowH + rowGap;
+        vps[0] = {0, 0, SCR_W, rowH};
+        vps[1] = {0, y2, SCR_W, rowH};
     } else {
         // 3 or 4: 2x2 grid
-        vps[0] = {0, 0, 398, 238};
-        vps[1] = {402, 0, 398, 238};
-        vps[2] = {0, 242, 398, 238};
+        int colGap = 4;
+        int rowGap = 4;
+        int colW = (SCR_W - colGap) / 2;
+        int rowH = (chartAreaH - rowGap) / 2;
+        int x2 = colW + colGap;
+        int y2 = rowH + rowGap;
+        vps[0] = {0, 0, colW, rowH};
+        vps[1] = {x2, 0, colW, rowH};
+        vps[2] = {0, y2, colW, rowH};
         if (cfgLayout == 4) {
-            vps[3] = {402, 242, 398, 238};
+            vps[3] = {x2, y2, colW, rowH};
         }
     }
 
@@ -3756,12 +3791,18 @@ void renderAllCharts() {
 
     // Draw divider lines
     if (cfgLayout >= 2) {
-        hLine(0, 799, 239);
-        hLine(0, 799, 240);
+        int centerY = vps[0].h + 1;
+        hLine(0, SCR_W - 1, centerY);
+        hLine(0, SCR_W - 1, centerY + 1);
     }
     if (cfgLayout >= 3) {
-        vLine(399, 0, 479);
-        vLine(400, 0, 479);
+        int centerX = vps[0].w + 1;
+        vLine(centerX, 0, chartAreaH - 1);
+        vLine(centerX + 1, 0, chartAreaH - 1);
+    }
+
+    if (footerH > 0) {
+        drawGlobalFooter(chartAreaH, footerH);
     }
 }
 
