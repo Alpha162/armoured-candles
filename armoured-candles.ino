@@ -2966,19 +2966,41 @@ bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     }
 
     for (int i = skip; i < total && candleCount < numCandles; i++) {
-        JsonObject c = arr[i];
         float o, h, l, cl, v;
-        if (!readJsonFloat(c["open"], o) || !readJsonFloat(c["high"], h) || !readJsonFloat(c["low"], l) ||
-            !readJsonFloat(c["close"], cl) || !readJsonFloat(c["quantity"], v)) {
-            Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
-            continue;
+        uint64_t t = 0;
+
+        if (arr[i].is<JsonArray>()) {
+            // Array format: [low, high, open, close, amount, quantity,
+            //   buyAmount, buyQuantity, tradeCount, ts, weightedAvg,
+            //   interval, startTime, closeTime]
+            JsonArray c = arr[i].as<JsonArray>();
+            if (c.size() < 13 ||
+                !readJsonFloat(c[2], o) || !readJsonFloat(c[1], h) ||
+                !readJsonFloat(c[0], l) || !readJsonFloat(c[3], cl) ||
+                !readJsonFloat(c[5], v)) {
+                Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
+                continue;
+            }
+            t = c[12].as<uint64_t>();
+            if (t == 0 && c[12].is<const char*>()) {
+                const char* ts = c[12].as<const char*>();
+                if (ts && *ts) t = strtoull(ts, nullptr, 10);
+            }
+        } else {
+            // Object format (legacy): {open, high, low, close, quantity, startTime, ...}
+            JsonObject c = arr[i].as<JsonObject>();
+            if (!readJsonFloat(c["open"], o) || !readJsonFloat(c["high"], h) || !readJsonFloat(c["low"], l) ||
+                !readJsonFloat(c["close"], cl) || !readJsonFloat(c["quantity"], v)) {
+                Serial.printf("Poloniex: skipping malformed candle at index %d\n", i);
+                continue;
+            }
+            t = c["startTime"].as<uint64_t>();
+            if (t == 0 && c["startTime"].is<const char*>()) {
+                const char* ts = c["startTime"].as<const char*>();
+                if (ts && *ts) t = strtoull(ts, nullptr, 10);
+            }
         }
 
-        uint64_t t = c["startTime"].as<uint64_t>();
-        if (t == 0 && c["startTime"].is<const char*>()) {
-            const char* ts = c["startTime"].as<const char*>();
-            if (ts && *ts) t = strtoull(ts, nullptr, 10);
-        }
         if (t == 0) {
             Serial.printf("Poloniex: skipping candle with invalid startTime at index %d\n", i);
             continue;
