@@ -46,8 +46,9 @@ jobs:
           m = re.fullmatch(r'(v?)(\d+)\.(\d+)\.(\d+)', raw)
           if not m:
             raise SystemExit(f'Unsupported version format: {raw!r}')
+
           prefix, major, minor, patch = m.groups()
-          new_version = f"{prefix}{major}.{minor}.{int(patch)+1}"
+          new_version = f"{prefix}{major}.{minor}.{int(patch) + 1}"
           vf.write_text(new_version + '\n')
           print(f'new_version={new_version}')
           Path('/tmp/version_output').write_text(new_version)
@@ -62,6 +63,7 @@ jobs:
             echo "No version change detected."
             exit 0
           fi
+
           git config user.name "armoured-candles-bot"
           git config user.email "armoured-candles-bot@users.noreply.github.com"
           git add version.txt

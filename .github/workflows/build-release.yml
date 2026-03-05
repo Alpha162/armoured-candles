@@ -1,9 +1,11 @@
 name: build-release
 
 on:
-  workflow_run:
-    workflows: ["version-bump"]
-    types: [completed]
+  push:
+    branches:
+      - main
+    paths:
+      - version.txt
   workflow_dispatch:
 
 permissions:
@@ -12,25 +14,26 @@ permissions:
 jobs:
   build:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      github.actor != 'github-actions[bot]' ||
+      contains(github.event.head_commit.message, 'chore: bump firmware version')
     runs-on: ubuntu-latest
     env:
       BOARD_FQBN: esp32:esp32:XIAO_ESP32S3
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Read version metadata
         id: meta
         run: |
           set -euo pipefail
           VERSION=$(tr -d '[:space:]' < version.txt)
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          BUILD_TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "build_ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "build_ts=$BUILD_TS" >> "$GITHUB_OUTPUT"
 
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -50,12 +53,13 @@ jobs:
             --fqbn "$BOARD_FQBN" \
             --output-dir build \
             --build-property compiler.cpp.extra_flags="-DFW_VERSION=\"${{ steps.meta.outputs.version }}\" -DFW_GIT_SHA=\"${{ steps.meta.outputs.short_sha }}\" -DFW_BUILD_TIMESTAMP=\"${{ steps.meta.outputs.build_ts }}\"" \
-            armoured-candles.ino
+            .
 
       - name: Normalize binary name
         run: |
           set -euo pipefail
-          BIN=$(find build -maxdepth 1 -name '*.bin' | head -n 1)
+          BIN=$(find build -name '*.bin' | head -n 1)
+          test -n "$BIN"
           cp "$BIN" "build/armoured-candles-${{ steps.meta.outputs.version }}.bin"
 
       - name: Create manifest

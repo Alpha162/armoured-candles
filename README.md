@@ -56,7 +56,7 @@ build_flags =
 
 - `.github/workflows/version-bump.yml` runs on pushes to `main`, skips bot/`[skip bump]` commits, and only bumps on merge commits.
 - The bump workflow updates `version.txt`, commits with bot identity, and pushes back to `main`.
-- `.github/workflows/build-release.yml` runs after a successful bump (or manually), compiles firmware, then uploads:
+- `.github/workflows/build-release.yml` runs on `main` pushes that change `version.txt` (or manually), compiles firmware, then uploads:
   - `armoured-candles-<version>.bin`
   - `manifest.json` (`version`, `url`, `sha256`, `size`, `board`)
 - Release assets are published to a GitHub release tag `fw-<version>` for OTA polling clients.
