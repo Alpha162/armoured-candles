@@ -3434,7 +3434,9 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     // Adaptive layout values based on viewport size
     int moodReserve = cfgPersonalityEnabled ? (isFullScreen ? 26 : 20) : 0;
     int mT = (isFullScreen ? 31 : 16) + moodReserve;
-    int mB = isFullScreen ? 18 : 10;
+    // Keep enough breathing room for time labels in multi-panel layouts.
+    // Smaller viewports were clipping the bottom of labels/bars near row dividers.
+    int mB = isFullScreen ? 18 : 14;
     int mL = (vp.w >= 600) ? 9 : 5;
     int mR = isFullScreen ? 72 : (vp.w >= 500 ? 48 : 40);
     int rH = isFullScreen ? 38 : 22;
