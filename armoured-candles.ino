@@ -44,8 +44,17 @@
 #define FW_BOARD_ID "xiao-esp32s3-epdchart"
 #endif
 
-// Optional TLS pinning fingerprint for remote OTA HTTPS (SHA1, 59 chars with colons).
-static const char* REMOTE_OTA_TLS_FINGERPRINT = "";
+#ifndef FW_GIT_SHA
+#define FW_GIT_SHA "unknown"
+#endif
+
+#ifndef FW_BUILD_TIMESTAMP
+#define FW_BUILD_TIMESTAMP "unknown"
+#endif
+
+// Optional root CA certificate (PEM) for remote OTA HTTPS verification.
+// Leave empty to skip TLS verification (setInsecure).
+static const char* REMOTE_OTA_TLS_CA_CERT = "";
 
 #define MAX_CANDLES     200
 #define MAX_SLOTS       4
@@ -2302,8 +2311,8 @@ bool beginHttpForUrl(HTTPClient& http, const String& url) {
     static WiFiClient plain;
     if (url.startsWith("https://")) {
         secure.setTimeout(15000);
-        if (REMOTE_OTA_TLS_FINGERPRINT[0] != '\0') {
-            secure.setFingerprint(REMOTE_OTA_TLS_FINGERPRINT);
+        if (REMOTE_OTA_TLS_CA_CERT[0] != '\0') {
+            secure.setCACert(REMOTE_OTA_TLS_CA_CERT);
         } else {
             secure.setInsecure();
         }
