@@ -37,7 +37,7 @@
 
 // ─── COMPILE-TIME CONSTANTS ────────────────────────────
 #ifndef FW_VERSION
-#define FW_VERSION "v1.0.0"
+#define FW_VERSION "v1.0.6"
 #endif
 
 #ifndef FW_BOARD_ID
