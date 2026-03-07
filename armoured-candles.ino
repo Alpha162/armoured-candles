@@ -124,6 +124,8 @@ struct ChartSlot {
     float  lastPrice;
     float  lastPctChange;
     SlotEvent lastEvent;
+    bool          lastFetchOk;   // true if last fetch succeeded
+    unsigned long lastFetchMs;   // millis() of last fetch attempt (0 = never)
 };
 
 // ─── RUNTIME CONFIG (loaded from NVS) ──────────────────
@@ -203,6 +205,11 @@ bool     remoteOtaAllowDowngrade = false;
 unsigned long lastRemoteOtaCheckMs = 0;
 unsigned long remoteOtaNextAllowedMs = 0;
 int      remoteOtaFailureCount = 0;
+
+// ─── QUIET HOURS ────────────────────────────────────────
+bool cfgQuietEnabled = false;
+int  cfgQuietStart   = 23;  // 0-23 hour (local time)
+int  cfgQuietEnd     = 7;   // 0-23 hour (local time)
 
 // ─── FRAMEBUFFER ────────────────────────────────────────
 static unsigned char framebuf[BUF_SIZE];
@@ -675,7 +682,37 @@ void toUpperInPlace(char* s) {
 bool isValidExchange(const char* s) {
     return s && (strcmp(s, "hyperliquid") == 0 || strcmp(s, "binance") == 0 ||
                  strcmp(s, "asterdex") == 0 || strcmp(s, "kraken") == 0 ||
-                 strcmp(s, "poloniex") == 0);
+                 strcmp(s, "poloniex") == 0 || strcmp(s, "okx") == 0);
+}
+
+// Map common interval strings to OKX bar parameter format
+static void intervalToOkxBar(const char* iv, char* out, size_t outLen) {
+    if      (strcmp(iv, "1h")  == 0) strncpy(out, "1H",    outLen);
+    else if (strcmp(iv, "2h")  == 0) strncpy(out, "2H",    outLen);
+    else if (strcmp(iv, "4h")  == 0) strncpy(out, "4H",    outLen);
+    else if (strcmp(iv, "6h")  == 0) strncpy(out, "6H",    outLen);
+    else if (strcmp(iv, "8h")  == 0) strncpy(out, "8H",    outLen);
+    else if (strcmp(iv, "12h") == 0) strncpy(out, "12H",   outLen);
+    else if (strcmp(iv, "1d")  == 0) strncpy(out, "1Dutc", outLen);
+    else if (strcmp(iv, "3d")  == 0) strncpy(out, "3Dutc", outLen);
+    else if (strcmp(iv, "1w")  == 0) strncpy(out, "1Wutc", outLen);
+    else if (strcmp(iv, "1M")  == 0) strncpy(out, "1Mutc", outLen);
+    else strncpy(out, iv, outLen);
+    out[outLen - 1] = '\0';
+}
+
+bool isInQuietHours() {
+    if (!cfgQuietEnabled) return false;
+    time_t now = time(nullptr);
+    if (now < 100000) return false;  // clock not synced yet
+    struct tm* t = localtime(&now);
+    int h = t->tm_hour;
+    if (cfgQuietStart <= cfgQuietEnd) {
+        return h >= cfgQuietStart && h < cfgQuietEnd;
+    } else {
+        // wraps midnight (e.g. 23:00–07:00)
+        return h >= cfgQuietStart || h < cfgQuietEnd;
+    }
 }
 
 bool isValidInterval(const char* s) {
@@ -852,6 +889,9 @@ void loadConfig() {
     }
     remoteOtaAutoApply = prefs.getBool("rOtaAuto", false);
     remoteOtaAllowDowngrade = prefs.getBool("rOtaAllowDw", false);
+    cfgQuietEnabled = prefs.getBool("quietEn", false);
+    cfgQuietStart   = constrain(prefs.getInt("quietStart", 23), 0, 23);
+    cfgQuietEnd     = constrain(prefs.getInt("quietEnd",    7), 0, 23);
 
     // Initialize all slots with defaults
     for (int i = 0; i < MAX_SLOTS; i++) {
@@ -862,6 +902,8 @@ void loadConfig() {
         slots[i].lastEvent.ts = 0;
         slots[i].lastEvent.type = SLOT_EVENT_NONE;
         slots[i].lastEvent.message[0] = '\0';
+        slots[i].lastFetchOk = false;
+        slots[i].lastFetchMs = 0;
     }
 
     // Check for migration from old single-chart format
@@ -947,6 +989,9 @@ void saveConfig() {
     prefs.putString("rOtaChan", remoteOtaChannel);
     prefs.putBool("rOtaAuto", remoteOtaAutoApply);
     prefs.putBool("rOtaAllowDw", remoteOtaAllowDowngrade);
+    prefs.putBool("quietEn", cfgQuietEnabled);
+    prefs.putInt("quietStart", cfgQuietStart);
+    prefs.putInt("quietEnd", cfgQuietEnd);
 
     for (int i = 0; i < MAX_SLOTS; i++) {
         saveSlotConfig(i);
@@ -1155,6 +1200,8 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     <div class="pill" id="pillCrypto">Crypto --</div>
     <div class="pill" id="pillUptime">--</div>
     <div class="pill" id="pillMem">Mem --</div>
+    <div class="pill" id="pillNext" style="display:none">--</div>
+    <div class="pill warn" id="pillQuiet" style="display:none">Quiet</div>
   </div>
 </div>
 
@@ -1242,6 +1289,21 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
           <option value="43200">UTC+12</option>
         </select>
       </div>
+      <div class="toggle-row" style="margin-top:10px">
+        <span class="label">Quiet hours (skip refresh)</span>
+        <label class="toggle"><input type="checkbox" id="quietEnabled"><span class="slider"></span></label>
+      </div>
+      <div class="row" id="quietHoursRow" style="margin-top:8px;display:none">
+        <div class="field">
+          <label>Sleep from hour (0-23)</label>
+          <input type="number" id="quietStart" min="0" max="23" value="23">
+        </div>
+        <div class="field">
+          <label>Wake at hour (0-23)</label>
+          <input type="number" id="quietEnd" min="0" max="23" value="7">
+        </div>
+      </div>
+      <div class="hint" id="quietHint" style="display:none">Display refresh is skipped during this window. Uses device local time. Web UI stays available.</div>
     </div>
   </div>
 
@@ -1268,6 +1330,19 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
           <input type="password" id="uiPass" placeholder="Set to enable API auth">
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- CONFIG BACKUP -->
+  <div class="card">
+    <div class="card-head"><span class="icon">&#128190;</span><h2>Config Backup</h2></div>
+    <div class="card-body" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="btn" onclick="exportConfig()">&#8681; Export Config</button>
+      <label class="btn" style="cursor:pointer">
+        &#8679; Import Config
+        <input type="file" id="importFile" accept=".json" style="display:none" onchange="importConfig(this)">
+      </label>
+      <div class="hint" style="width:100%;margin-top:4px">Export saves all settings as a JSON file. Import restores from a previously exported file.</div>
     </div>
   </div>
 
@@ -1357,11 +1432,12 @@ const EX_INTERVALS = {
   binance:['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'],
   asterdex:['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w','1M'],
   kraken:['1m','5m','15m','30m','1h','4h','1d','1w'],
-  poloniex:['1m','5m','15m','30m','1h','2h','4h','6h','12h','1d','3d','1w','1M']
+  poloniex:['1m','5m','15m','30m','1h','2h','4h','6h','12h','1d','3d','1w','1M'],
+  okx:['1m','3m','5m','15m','30m','1h','2h','4h','6h','12h','1d','1w','1M']
 };
 const QUOTE_DEFAULTS = {
   hyperliquid:['USDC'],binance:['USDT','BUSD','USDC'],asterdex:['USDT'],
-  kraken:['USD','USDT','EUR'],poloniex:['USDT','USDC']
+  kraken:['USD','USDT','EUR'],poloniex:['USDT','USDC'],okx:['USDT','USDC']
 };
 const MAX_SLOTS = 4;
 
@@ -1391,7 +1467,8 @@ function buildSlotCards() {
   let html = '';
   for (let i = 0; i < MAX_SLOTS; i++) {
     html += '<div class="slot-card" id="slotCard_'+i+'">' +
-      '<div class="card"><div class="card-head"><span class="icon">&#9670;</span><h2>Chart '+(i+1)+'</h2></div>' +
+      '<div class="card"><div class="card-head"><span class="icon">&#9670;</span><h2>Chart '+(i+1)+'</h2>' +
+      '<span id="slotStatus_'+i+'" style="margin-left:auto;font-size:0.7em;font-family:\'JetBrains Mono\',monospace;padding:2px 8px;border-radius:10px;background:var(--surface2);color:var(--text-dim)">--</span></div>' +
       '<div class="card-body">' +
       '<div class="field"><label>Exchange</label>' +
       '<select id="exchange_'+i+'">' +
@@ -1399,7 +1476,8 @@ function buildSlotCards() {
       '<option value="binance">Binance</option>' +
       '<option value="asterdex">AsterDEX</option>' +
       '<option value="kraken">Kraken</option>' +
-      '<option value="poloniex">Poloniex</option></select></div>' +
+      '<option value="poloniex">Poloniex</option>' +
+      '<option value="okx">OKX</option></select></div>' +
       '<div class="row">' +
       '<div class="field"><label>Coin</label><div class="coin-wrap">' +
       '<input type="text" id="coinSearch_'+i+'" placeholder="Search coins..." autocomplete="off">' +
@@ -1651,6 +1729,16 @@ async function loadConfig() {
     el('remoteOtaChannel').value = (d.remoteOtaChannel === 'beta') ? 'beta' : 'stable';
     el('remoteOtaAutoApply').checked = !!d.remoteOtaAutoApply;
     el('remoteOtaAllowDowngrade').checked = !!d.remoteOtaAllowDowngrade;
+    var qe = !!d.quietEnabled;
+    el('quietEnabled').checked = qe;
+    el('quietStart').value = d.quietStart != null ? d.quietStart : 23;
+    el('quietEnd').value = d.quietEnd != null ? d.quietEnd : 7;
+    el('quietHoursRow').style.display = qe ? 'flex' : 'none';
+    el('quietHint').style.display = qe ? 'block' : 'none';
+    var pq = el('pillQuiet');
+    if (d.inQuietHours) { pq.style.display=''; pq.textContent='Quiet'; }
+    else { pq.style.display='none'; }
+    if (typeof d.nextRefreshMs === 'number') startCountdown(d.nextRefreshMs);
     setAuthHeader();
 
     // Per-slot config
@@ -1672,6 +1760,20 @@ async function loadConfig() {
       el('heikinAshi_'+i).checked = s.heikinAshi || false;
       el('eventCallouts_'+i).checked = s.eventCallouts !== false;
       updateSlotAutoInfo(i);
+      // Per-slot fetch status badge
+      var badge = el('slotStatus_'+i);
+      if (badge) {
+        var age = (s.fetchAge != null) ? s.fetchAge : -1;
+        if (age < 0) {
+          badge.textContent='--'; badge.style.color='var(--text-dim)'; badge.style.background='var(--surface2)';
+        } else if (s.fetchOk) {
+          badge.textContent='OK '+(age<60?age+'s':Math.floor(age/60)+'m')+' ago';
+          badge.style.color='var(--green)'; badge.style.background='var(--green-dim)';
+        } else {
+          badge.textContent='FAIL';
+          badge.style.color='var(--red)'; badge.style.background='var(--red-dim)';
+        }
+      }
     }
 
     // Status pills
@@ -1749,13 +1851,89 @@ async function saveConfig() {
     remoteOtaCheckMin: remoteMin,
     remoteOtaChannel: el('remoteOtaChannel').value,
     remoteOtaAutoApply: el('remoteOtaAutoApply').checked,
-    remoteOtaAllowDowngrade: el('remoteOtaAllowDowngrade').checked
+    remoteOtaAllowDowngrade: el('remoteOtaAllowDowngrade').checked,
+    quietEnabled: el('quietEnabled').checked,
+    quietStart: parseInt(el('quietStart').value) || 0,
+    quietEnd: parseInt(el('quietEnd').value) || 0
   };
   setAuthHeader();
   try {
     var r = await authFetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     if (r.ok) toast('Config saved'); else toast('Save failed', true);
   } catch(e) { toast('Connection error', true); }
+}
+
+// ── Quiet hours toggle ──
+document.addEventListener('DOMContentLoaded', function() {
+  el('quietEnabled').addEventListener('change', function() {
+    var on = this.checked;
+    el('quietHoursRow').style.display = on ? 'flex' : 'none';
+    el('quietHint').style.display = on ? 'block' : 'none';
+  });
+});
+
+// ── Countdown to next display refresh ──
+var countdownTarget = 0;
+var countdownTimer = null;
+function startCountdown(msFromNow) {
+  countdownTarget = Date.now() + msFromNow;
+  if (countdownTimer) clearInterval(countdownTimer);
+  var pill = el('pillNext');
+  pill.style.display = '';
+  countdownTimer = setInterval(function() {
+    var rem = Math.max(0, countdownTarget - Date.now());
+    var m = Math.floor(rem / 60000);
+    var s = Math.floor((rem % 60000) / 1000);
+    if (rem === 0) { pill.textContent = 'Refreshing...'; pill.className = 'pill neutral'; }
+    else { pill.textContent = 'Next: ' + m + ':' + (s < 10 ? '0' : '') + s; pill.className = 'pill'; }
+  }, 1000);
+}
+
+// ── Config export / import ──
+async function exportConfig() {
+  try {
+    var r = await authFetch('/api/status');
+    var d = await r.json();
+    var cfg = {
+      layout: d.layout, refreshMin: d.refreshMin, tzOffset: d.tzOffset,
+      fullRefEvery: d.fullRefEvery, partialPct: d.partialPct,
+      personalityEnabled: d.personalityEnabled, captionVerbosity: d.captionVerbosity,
+      quietEnabled: d.quietEnabled, quietStart: d.quietStart, quietEnd: d.quietEnd,
+      ssid: d.ssid, uiUser: d.uiUser,
+      remoteOtaEnabled: d.remoteOtaEnabled, remoteOtaManifestUrl: d.remoteOtaManifestUrl,
+      remoteOtaCheckMin: d.remoteOtaCheckMin, remoteOtaChannel: d.remoteOtaChannel,
+      remoteOtaAutoApply: d.remoteOtaAutoApply, remoteOtaAllowDowngrade: d.remoteOtaAllowDowngrade,
+      slots: (d.slots || []).map(function(s) { return {
+        exchange: s.exchange, coin: s.coin, quote: s.quote, interval: s.interval,
+        autoCandles: s.autoCandles, numCandles: s.numCandles,
+        emaFast: s.emaFast, emaSlow: s.emaSlow, rsiPeriod: s.rsiPeriod,
+        heikinAshi: s.heikinAshi, eventCallouts: s.eventCallouts
+      }; })
+    };
+    var blob = new Blob([JSON.stringify(cfg, null, 2)], {type: 'application/json'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'epdchart-config.json';
+    a.click();
+    toast('Config exported');
+  } catch(e) { toast('Export failed', true); }
+}
+async function importConfig(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = async function(ev) {
+    try {
+      var cfg = JSON.parse(ev.target.result);
+      if (!confirm('Apply this config? Current settings will be overwritten.')) { input.value = ''; return; }
+      setAuthHeader();
+      var r = await authFetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)});
+      if (r.ok) { toast('Config imported \u2014 reloading...'); setTimeout(loadConfig, 1000); }
+      else toast('Import failed: server rejected config', true);
+    } catch(ex) { toast('Invalid JSON file', true); }
+    input.value = '';
+  };
+  reader.readAsText(file);
 }
 
 async function refreshNow() {
@@ -1889,6 +2067,13 @@ void handleStatus() {
     doc["remoteOtaChannel"] = remoteOtaChannel;
     doc["remoteOtaAutoApply"] = remoteOtaAutoApply;
     doc["remoteOtaAllowDowngrade"] = remoteOtaAllowDowngrade;
+    doc["quietEnabled"] = cfgQuietEnabled;
+    doc["quietStart"]   = cfgQuietStart;
+    doc["quietEnd"]     = cfgQuietEnd;
+    doc["inQuietHours"] = isInQuietHours();
+    long msUntilRefresh = (long)((unsigned long)cfgRefreshMin * 60UL * 1000UL)
+                          - (long)(millis() - lastRefreshMs);
+    doc["nextRefreshMs"] = max(0L, msUntilRefresh);
     doc["heap"] = ESP.getFreeHeap();
     doc["fwVersion"] = FW_VERSION;
     doc["gitSha"] = FW_GIT_SHA;
@@ -1921,6 +2106,10 @@ void handleStatus() {
         s["eventTs"] = slots[i].lastEvent.ts;
         s["eventType"] = slotEventTypeToStr(slots[i].lastEvent.type);
         s["eventMessage"] = slots[i].lastEvent.message;
+        s["fetchOk"] = slots[i].lastFetchOk;
+        s["fetchAge"] = (slots[i].lastFetchMs > 0)
+            ? (int)((millis() - slots[i].lastFetchMs) / 1000)
+            : -1;
     }
 
     String out;
@@ -1953,6 +2142,9 @@ void handleConfigPost() {
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
     if (doc.containsKey("personalityEnabled")) cfgPersonalityEnabled = doc["personalityEnabled"].as<bool>();
     if (doc.containsKey("captionVerbosity")) cfgCaptionVerbosity = constrain(doc["captionVerbosity"].as<int>(), 0, 2);
+    if (doc.containsKey("quietEnabled")) cfgQuietEnabled = doc["quietEnabled"].as<bool>();
+    if (doc.containsKey("quietStart")) cfgQuietStart = constrain(doc["quietStart"].as<int>(), 0, 23);
+    if (doc.containsKey("quietEnd"))   cfgQuietEnd   = constrain(doc["quietEnd"].as<int>(), 0, 23);
 
     if (doc.containsKey("remoteOtaEnabled")) remoteOtaEnabled = doc["remoteOtaEnabled"].as<bool>();
     if (doc.containsKey("remoteOtaManifestUrl")) {
@@ -3017,6 +3209,76 @@ bool fetchCandlesPoloniex(int numCandles, uint64_t startMs, uint64_t nowMs) {
     return candleCount > 0;
 }
 
+// ── OKX ──────────────────────────────────────────────
+bool fetchCandlesOKX(int numCandles) {
+    char barStr[8];
+    intervalToOkxBar(cfgInterval, barStr, sizeof(barStr));
+
+    int limit = min(numCandles + 10, 100);
+
+    char url[256];
+    snprintf(url, sizeof(url),
+        "https://www.okx.com/api/v5/market/candles?instId=%s-%s&bar=%s&limit=%d",
+        cfgCoin, cfgQuote, barStr, limit);
+    Serial.printf("GET: %s\n", url);
+
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(15000);
+
+    int httpCode = http.GET();
+    if (httpCode != 200) { logHttpError(httpCode); http.end(); return false; }
+
+    String payload = http.getString();
+    http.end();
+    Serial.printf("OKX payload: %d bytes\n", payload.length());
+
+    DynamicJsonDocument doc(65536);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) { Serial.printf("OKX JSON error: %s\n", err.c_str()); return false; }
+
+    JsonArray data = doc["data"].as<JsonArray>();
+    if (data.isNull() || data.size() == 0) {
+        Serial.println("OKX: empty data array");
+        return false;
+    }
+
+    // OKX returns newest-first; collect into a temp buffer then reverse
+    int rawCount = (int)data.size();
+    if (rawCount > MAX_CANDLES) rawCount = MAX_CANDLES;
+
+    // Parse into candles[] in reverse order (oldest first)
+    candleCount = 0;
+    for (int i = rawCount - 1; i >= 0; i--) {
+        JsonArray row = data[i].as<JsonArray>();
+        if (row.isNull() || row.size() < 5) continue;
+        float o = atof(row[1].as<const char*>());
+        float h = atof(row[2].as<const char*>());
+        float l = atof(row[3].as<const char*>());
+        float cl = atof(row[4].as<const char*>());
+        float v = (row.size() > 5) ? atof(row[5].as<const char*>()) : 0.0f;
+        uint64_t ts = strtoull(row[0].as<const char*>(), nullptr, 10);
+        if (o <= 0 || h <= 0 || l <= 0 || cl <= 0) continue;
+        if (candleCount >= MAX_CANDLES) break;
+        candles[candleCount].o = o;
+        candles[candleCount].h = h;
+        candles[candleCount].l = l;
+        candles[candleCount].c = cl;
+        candles[candleCount].v = v;
+        candles[candleCount].t = ts;
+        candleCount++;
+    }
+
+    // Trim to requested count (keep most recent)
+    if (candleCount > numCandles) {
+        int drop = candleCount - numCandles;
+        memmove(candles, candles + drop, (candleCount - drop) * sizeof(Candle));
+        candleCount -= drop;
+    }
+
+    return candleCount > 0;
+}
+
 // ── Main dispatcher ──────────────────────────────────
 bool fetchCandles() {
     if (WiFi.status() != WL_CONNECTED) {
@@ -3045,6 +3307,8 @@ bool fetchCandles() {
         ok = fetchCandlesKraken(numCandles, startMs);
     else if (strcmp(cfgExchange, "poloniex") == 0)
         ok = fetchCandlesPoloniex(numCandles, startMs, nowMs);
+    else if (strcmp(cfgExchange, "okx") == 0)
+        ok = fetchCandlesOKX(numCandles);
     else
         ok = fetchCandlesHyperliquid(numCandles, startMs, nowMs);
 
@@ -3084,6 +3348,8 @@ bool fetchSlotCandles(int slotIdx) {
 
     Serial.printf("Fetching slot %d: %s %s/%s %s\n", slotIdx, sc.exchange, sc.coin, sc.quote, sc.interval);
     bool ok = fetchCandles();
+    slots[slotIdx].lastFetchOk = ok;
+    slots[slotIdx].lastFetchMs = millis();
 
     if (ok) {
         // Copy results from scratch globals into slot
@@ -4033,12 +4299,17 @@ void loop() {
     unsigned long interval = (unsigned long)cfgRefreshMin * 60UL * 1000UL;
     if (WiFi.status() == WL_CONNECTED) {
         if (forceRefresh || (millis() - lastRefreshMs >= interval)) {
-            bool doFull = forceRefresh;
-            forceRefresh = false;
-            lastRefreshMs = millis();
-
-            Serial.println("Refresh cycle starting...");
-            doRefreshCycle(doFull);
+            if (!forceRefresh && isInQuietHours()) {
+                // Bump timer and skip — check again next interval
+                lastRefreshMs = millis();
+                Serial.println("Quiet hours — skipping refresh");
+            } else {
+                bool doFull = forceRefresh;
+                forceRefresh = false;
+                lastRefreshMs = millis();
+                Serial.println("Refresh cycle starting...");
+                doRefreshCycle(doFull);
+            }
         }
     } else if (!apModeActive) {
         // Lost WiFi mid-session and not in AP mode yet
