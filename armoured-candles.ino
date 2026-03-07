@@ -135,6 +135,7 @@ char     cfgSSID[64]      = "YOUR_SSID";
 char     cfgPass[64]      = "YOUR_PASSWORD";
 int      cfgLayout        = 1;        // 1, 2, 3, or 4
 int      cfgRefreshMin    = 5;
+bool     cfgAutoRefresh   = true;     // derive refresh interval from active slot timescales
 int      cfgTzOffset      = 0;        // seconds from UTC
 int      cfgFullRefEvery  = 10;
 int      cfgPartialPct    = 40;       // 0-100
@@ -596,6 +597,26 @@ uint64_t intervalToMs(const char* iv) {
     }
 }
 
+// Returns the effective display refresh interval in ms.
+// When cfgAutoRefresh is on, uses the smallest interval across active slots.
+// Falls back to cfgRefreshMin if clock isn't ready or slots have no valid interval.
+unsigned long effectiveRefreshMs() {
+    if (!cfgAutoRefresh) {
+        return (unsigned long)cfgRefreshMin * 60UL * 1000UL;
+    }
+    uint64_t minMs = UINT64_MAX;
+    for (int i = 0; i < cfgLayout && i < MAX_SLOTS; i++) {
+        uint64_t ms = intervalToMs(slots[i].cfg.interval);
+        if (ms > 0 && ms < minMs) minMs = ms;
+    }
+    if (minMs == UINT64_MAX) {
+        return (unsigned long)cfgRefreshMin * 60UL * 1000UL;
+    }
+    // Clamp to minimum 1 minute (avoid hammering the display/API)
+    if (minMs < 60000ULL) minMs = 60000ULL;
+    return (unsigned long)minMs;
+}
+
 int autoCandles(const char* iv) {
     if (strcmp(iv, "1m")  == 0) return 120;
     if (strcmp(iv, "3m")  == 0) return 80;
@@ -876,6 +897,7 @@ void loadConfig() {
     cfgPartialPct   = prefs.getInt("partialPct", cfgPartialPct);
     cfgLayout       = prefs.getInt("layout", 1);
     if (cfgLayout < 1 || cfgLayout > 4) cfgLayout = 1;
+    cfgAutoRefresh  = prefs.getBool("autoRefresh", true);
     cfgPersonalityEnabled = prefs.getBool("personality", true);
     cfgCaptionVerbosity = constrain(prefs.getInt("captionVerb", 1), 0, 2);
     remoteOtaEnabled = prefs.getBool("rOtaEn", false);
@@ -977,6 +999,7 @@ void saveConfig() {
     prefs.putString("uiUser", cfgUiUser);
     prefs.putString("uiPass", cfgUiPass);
     prefs.putInt("refreshMin", cfgRefreshMin);
+    prefs.putBool("autoRefresh", cfgAutoRefresh);
     prefs.putInt("tzOffset", cfgTzOffset);
     prefs.putInt("fullRefEv", cfgFullRefEvery);
     prefs.putInt("partialPct", cfgPartialPct);
@@ -1236,9 +1259,14 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         <label class="layout-opt"><input type="radio" name="layout" value="4" onchange="onLayoutChange()">
           <div class="layout-thumb"><div class="lt-grid lt-4"><div class="lt-cell"></div><div class="lt-cell"></div><div class="lt-cell"></div><div class="lt-cell"></div></div><span>4</span></div></label>
       </div>
-      <div class="field" style="margin-top:14px">
+      <div class="toggle-row" style="margin-top:14px">
+        <span class="label">Auto refresh interval</span>
+        <label class="toggle"><input type="checkbox" id="autoRefresh" checked onchange="onAutoRefreshChange()"><span class="slider"></span></label>
+      </div>
+      <div id="autoRefreshInfo" class="auto-info" style="margin-top:8px">Auto: 5m (from shortest active interval)</div>
+      <div class="field" id="manualRefreshField" style="margin-top:8px;display:none">
         <label>Refresh every (minutes)</label>
-        <input type="number" id="refreshMin" min="1" max="60" value="5">
+        <input type="number" id="refreshMin" min="1" max="1440" value="5">
       </div>
     </div>
   </div>
@@ -1520,7 +1548,7 @@ function buildSlotCards() {
         el('coinSearch_'+idx).value = '';
         renderSlotCoinDd(idx, '');
       });
-      el('interval_'+idx).addEventListener('change', function(){ updateSlotAutoInfo(idx); });
+      el('interval_'+idx).addEventListener('change', function(){ updateSlotAutoInfo(idx); updateAutoRefreshInfo(); });
       el('autoCandles_'+idx).addEventListener('change', function(){ updateSlotAutoInfo(idx); });
       el('numCandles_'+idx).addEventListener('input', function(){ updateSlotAutoInfo(idx); });
 
@@ -1616,6 +1644,10 @@ async function fetchPairsForSlot(idx, ex) {
       var r = await authFetch('/api/poloniex/markets');
       var d = await r.json();
       list = (d||[]).filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);}).map(function(m){return m.symbol.split('_')[0];});
+    } else if (ex === 'okx') {
+      var r = await fetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT');
+      var d = await r.json();
+      list = (d.data||[]).filter(function(s){return s.quoteCcy===quote&&s.state==='live';}).map(function(s){return s.baseCcy;});
     }
     list.sort();
     list = list.filter(function(v,i,a){return i===0||v!==a[i-1];});
@@ -1647,7 +1679,37 @@ function onLayoutChange() {
   var radios = document.querySelectorAll('input[name="layout"]');
   for (var i=0;i<radios.length;i++) { if (radios[i].checked) currentLayout = parseInt(radios[i].value); }
   updateSlotDimming();
+  updateAutoRefreshInfo();
 }
+
+function computeAutoRefreshMin() {
+  var min = Infinity;
+  for (var i = 0; i < currentLayout; i++) {
+    var ivEl = el('interval_'+i);
+    if (ivEl) {
+      var m = IV_MINS[ivEl.value] || 5;
+      if (m < min) min = m;
+    }
+  }
+  return (min === Infinity) ? 5 : Math.max(1, min);
+}
+
+function updateAutoRefreshInfo() {
+  var autoOn = el('autoRefresh') && el('autoRefresh').checked;
+  if (!el('autoRefreshInfo')) return;
+  if (autoOn) {
+    var m = computeAutoRefreshMin();
+    var label = m < 60 ? m+'m' : (m/60).toFixed(1).replace(/\.0$/,'')+'h';
+    el('autoRefreshInfo').textContent = 'Auto: ' + label + ' (from shortest active interval)';
+    el('autoRefreshInfo').style.display = 'block';
+    el('manualRefreshField').style.display = 'none';
+  } else {
+    el('autoRefreshInfo').style.display = 'none';
+    el('manualRefreshField').style.display = 'block';
+  }
+}
+
+function onAutoRefreshChange() { updateAutoRefreshInfo(); }
 
 function updateSlotDimming() {
   for (var i=0;i<MAX_SLOTS;i++) {
@@ -1715,6 +1777,8 @@ async function loadConfig() {
 
     // Global settings
     el('refreshMin').value = d.refreshMin || 5;
+    el('autoRefresh').checked = d.autoRefresh !== false;
+    updateAutoRefreshInfo();
     el('tzOffset').value = String(d.tzOffset || 0);
     el('fullRefEvery').value = d.fullRefEvery || 10;
     el('partialPct').value = d.partialPct || 40;
@@ -1776,6 +1840,9 @@ async function loadConfig() {
       }
     }
 
+    // Refresh the auto-refresh label now that slot intervals are populated
+    updateAutoRefreshInfo();
+
     // Status pills
     el('pillIp').textContent = d.apMode ? ('AP: ' + d.apIP) : d.ip;
     if (d.apMode) { el('pillWifi').textContent='AP Mode'; el('pillWifi').className='pill warn'; }
@@ -1833,10 +1900,12 @@ async function saveConfig() {
       eventCallouts: el('eventCallouts_'+i).checked
     });
   }
+  var autoRefreshOn = el('autoRefresh').checked;
   var body = {
     layout: currentLayout,
     slots: slotsArr,
-    refreshMin: parseInt(el('refreshMin').value) || 5,
+    autoRefresh: autoRefreshOn,
+    refreshMin: autoRefreshOn ? computeAutoRefreshMin() : (parseInt(el('refreshMin').value) || 5),
     tzOffset: parseInt(el('tzOffset').value) || 0,
     fullRefEvery: parseInt(el('fullRefEvery').value) || 10,
     partialPct: parseInt(el('partialPct').value) || 40,
@@ -1895,7 +1964,7 @@ async function exportConfig() {
     var r = await authFetch('/api/status');
     var d = await r.json();
     var cfg = {
-      layout: d.layout, refreshMin: d.refreshMin, tzOffset: d.tzOffset,
+      layout: d.layout, refreshMin: d.refreshMin, autoRefresh: d.autoRefresh, tzOffset: d.tzOffset,
       fullRefEvery: d.fullRefEvery, partialPct: d.partialPct,
       personalityEnabled: d.personalityEnabled, captionVerbosity: d.captionVerbosity,
       quietEnabled: d.quietEnabled, quietStart: d.quietStart, quietEnd: d.quietEnd,
@@ -2039,6 +2108,8 @@ void handleStatus() {
     // Global settings
     doc["layout"] = cfgLayout;
     doc["refreshMin"] = cfgRefreshMin;
+    doc["autoRefresh"] = cfgAutoRefresh;
+    doc["autoRefreshMin"] = (int)(effectiveRefreshMs() / 60000UL);
     doc["tzOffset"] = cfgTzOffset;
     doc["fullRefEvery"] = cfgFullRefEvery;
     doc["partialPct"] = cfgPartialPct;
@@ -2071,8 +2142,7 @@ void handleStatus() {
     doc["quietStart"]   = cfgQuietStart;
     doc["quietEnd"]     = cfgQuietEnd;
     doc["inQuietHours"] = isInQuietHours();
-    long msUntilRefresh = (long)((unsigned long)cfgRefreshMin * 60UL * 1000UL)
-                          - (long)(millis() - lastRefreshMs);
+    long msUntilRefresh = (long)effectiveRefreshMs() - (long)(millis() - lastRefreshMs);
     doc["nextRefreshMs"] = max(0L, msUntilRefresh);
     doc["heap"] = ESP.getFreeHeap();
     doc["fwVersion"] = FW_VERSION;
@@ -2136,7 +2206,9 @@ void handleConfigPost() {
         int layout = doc["layout"].as<int>();
         if (layout >= 1 && layout <= 4) cfgLayout = layout;
     }
-    if (doc.containsKey("refreshMin"))  cfgRefreshMin   = constrain(doc["refreshMin"].as<int>(), 1, 60);
+    if (doc.containsKey("autoRefresh")) cfgAutoRefresh = doc["autoRefresh"].as<bool>();
+    if (!cfgAutoRefresh && doc.containsKey("refreshMin"))
+        cfgRefreshMin = constrain(doc["refreshMin"].as<int>(), 1, 1440);
     if (doc.containsKey("tzOffset"))    cfgTzOffset     = doc["tzOffset"].as<int>();
     if (doc.containsKey("fullRefEvery"))cfgFullRefEvery = constrain(doc["fullRefEvery"].as<int>(), 1, 50);
     if (doc.containsKey("partialPct"))  cfgPartialPct   = constrain(doc["partialPct"].as<int>(), 10, 100);
@@ -4296,7 +4368,7 @@ void loop() {
     remoteOtaTick();
 
     // Normal refresh cycle — only when we have WiFi
-    unsigned long interval = (unsigned long)cfgRefreshMin * 60UL * 1000UL;
+    unsigned long interval = effectiveRefreshMs();
     if (WiFi.status() == WL_CONNECTED) {
         if (forceRefresh || (millis() - lastRefreshMs >= interval)) {
             if (!forceRefresh && isInQuietHours()) {
