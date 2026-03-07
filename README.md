@@ -8,6 +8,9 @@ The firmware fetches OHLCV data, renders candles + indicators into a 1-bit frame
 
 ## What's New
 
+### v1.0.7
+- **Mood face relocated to bottom-right corner in multi-panel mode** — the happy/neutral/sad icon is now drawn at 2× scale (16×16 px) in the unused whitespace at the bottom-right of each panel (price-axis margin, below the volume strip), making it much easier to read. The top mood HUD bar keeps the text label ("BEARISH −0.97%") but no longer contains the tiny 8 px icon.
+
 ### v1.0.6
 - **Auto refresh interval** — display refresh period is automatically derived from the shortest active panel's candle interval (e.g. a 5m chart → 5-minute refresh). A toggle in the Layout card switches between auto and a user-specified value. The manual range is widened to 1–1440 minutes to support daily-candle setups.
 
