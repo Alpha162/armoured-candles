@@ -8,7 +8,10 @@ The firmware fetches OHLCV data, renders candles + indicators into a 1-bit frame
 
 ## What's New
 
-This README reflects the current firmware feature set after recent improvements, including:
+### v1.0.6
+- **Auto refresh interval** — display refresh period is automatically derived from the shortest active panel's candle interval (e.g. a 5m chart → 5-minute refresh). A toggle in the Layout card switches between auto and a user-specified value. The manual range is widened to 1–1440 minutes to support daily-candle setups.
+
+### Earlier
 
 - **Multi-panel layouts (1 / 2 / 3 / 4 charts)** rendered on a single 800×480 display
 - **Per-panel chart configuration** (exchange, pair, interval, indicators, HA mode)
@@ -38,16 +41,16 @@ The boot splash shows `Version <FW_VERSION>`.
 
 This repo uses `version.txt` as the version source of truth for CI builds and release automation.
 
-- `version.txt` currently stores a semantic version string (for example `v1.0.0`).
+- `version.txt` currently stores a semantic version string (for example `v1.0.6`).
 - The `version-bump` workflow increments the patch component on eligible merges and commits the new value.
 - Build workflows read `version.txt` and pass it to compilation as `-DFW_VERSION="<version>"`.
-- Manual Arduino IDE builds still work without CI flags and fall back to the firmware default (`FW_VERSION="v1.0.0"`).
+- Manual Arduino IDE builds still work without CI flags and fall back to the firmware default (`FW_VERSION="v1.0.6"`).
 
 You can still override manually in PlatformIO/CLI builds:
 
 ```ini
 build_flags =
-  -DFW_VERSION="v1.0.1"
+  -DFW_VERSION="v1.0.6"
   -DFW_GIT_SHA="local"
   -DFW_BUILD_TIMESTAMP="manual"
 ```
@@ -116,6 +119,7 @@ Open: `http://epdchart.local` (or the local IP)
 - **Layout**
   - Select 1, 2, 3, or 4 chart panels
   - Inactive slots are automatically dimmed in the editor
+  - **Auto refresh interval** toggle (default on): refresh period tracks the shortest active panel interval; disable to enter a custom value (1–1440 min)
 - **Chart Panels (per slot)**
   - Exchange, quote asset, coin search/select, interval
   - Auto/manual candle count
@@ -175,7 +179,8 @@ Stored in NVS (`Preferences` namespace `epdchart`):
 | Setting | Default | Range/Notes |
 |---------|---------|-------------|
 | Layout | `1` | 1–4 panels |
-| Refresh | `5` min | 1–60 |
+| Auto refresh | `true` | derive refresh from active panel intervals |
+| Refresh | `5` min | 1–1440 (used when auto refresh is off) |
 | Timezone offset | `0` sec | UTC offset |
 | Full refresh every | `10` cycles | 1–50 |
 | Partial threshold | `40%` | 10–100 |
