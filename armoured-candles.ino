@@ -37,7 +37,7 @@
 
 // ─── COMPILE-TIME CONSTANTS ────────────────────────────
 #ifndef FW_VERSION
-#define FW_VERSION "v1.0.6"
+#define FW_VERSION "v1.0.7"
 #endif
 
 #ifndef FW_BOARD_ID
@@ -3743,8 +3743,6 @@ void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen) {
     int hudW = min(vp.w - 6, fullScreen ? 380 : 250);
     int hudX = vp.x + 3;
     int hudY = vp.y + 2;
-    int faceScale = fullScreen ? 2 : 1;
-    int faceW = 8 * faceScale;
 
     drawRect(hudX, hudY, hudW, hudH);
     if (strcmp(mood.style, "bold") == 0) {
@@ -3753,15 +3751,22 @@ void drawMoodHud(const Viewport& vp, const MoodInfo& mood, bool fullScreen) {
         hLineDash(hudX + 1, hudX + hudW - 2, hudY + hudH - 2, 2, 2);
     }
 
-    const uint8_t* faceBmp = moodFaceNeutral;
-    if (mood.id == MOOD_VERY_BEARISH || mood.id == MOOD_BEARISH) faceBmp = moodFaceBearish;
-    else if (mood.id == MOOD_BULLISH || mood.id == MOOD_VERY_BULLISH) faceBmp = moodFaceBullish;
-
-    drawBitmapScaledFromProgmem(faceBmp, 8, 8, hudX + 3, hudY + (hudH - faceW) / 2, faceScale);
-
     char hudText[48];
     snprintf(hudText, sizeof(hudText), "%s %.2f%%", mood.caption, mood.aggregatePct);
-    drawString(hudX + 8 + faceW, hudY + (fullScreen ? 8 : 6), hudText, 1);
+
+    if (fullScreen) {
+        // Full-screen: draw face icon at scale 2 beside the text
+        int faceScale = 2;
+        int faceW = 8 * faceScale;
+        const uint8_t* faceBmp = moodFaceNeutral;
+        if (mood.id == MOOD_VERY_BEARISH || mood.id == MOOD_BEARISH) faceBmp = moodFaceBearish;
+        else if (mood.id == MOOD_BULLISH || mood.id == MOOD_VERY_BULLISH) faceBmp = moodFaceBullish;
+        drawBitmapScaledFromProgmem(faceBmp, 8, 8, hudX + 3, hudY + (hudH - faceW) / 2, faceScale);
+        drawString(hudX + 8 + faceW, hudY + 8, hudText, 1);
+    } else {
+        // Multi-panel: text only in the top bar; face is drawn larger in the bottom-right corner
+        drawString(hudX + 4, hudY + 6, hudText, 1);
+    }
 }
 
 void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
@@ -3883,6 +3888,21 @@ void renderSlotChart(const Viewport& vp, ChartSlot& slot) {
     MoodInfo slotMood = isFullScreen ? currentMood : moodFromPct(slot.lastPctChange);
     drawMoodHud(vp, slotMood, isFullScreen);
     hLine(vp.x, vp.x + vp.w - 1, vp.y + mT - 2);
+
+    // Multi-panel: draw mood face at 2× scale in the bottom-right whitespace
+    // (the mR zone below the volume separator line — no other content there).
+    if (!isFullScreen && cfgPersonalityEnabled) {
+        const uint8_t* faceBmp = moodFaceNeutral;
+        if (slotMood.id == MOOD_VERY_BEARISH || slotMood.id == MOOD_BEARISH) faceBmp = moodFaceBearish;
+        else if (slotMood.id == MOOD_BULLISH || slotMood.id == MOOD_VERY_BULLISH) faceBmp = moodFaceBullish;
+        int faceScale = 2;
+        int faceW = 8 * faceScale;  // 16 px
+        int faceX = vp.x + mL + chartW + (mR - faceW) / 2;
+        // Centre vertically in the zone from the volume separator to the panel bottom
+        int bottomZoneH = mB + vH;
+        int faceY = vp.y + vp.h - bottomZoneH + (bottomZoneH - faceW) / 2;
+        drawBitmapScaledFromProgmem(faceBmp, 8, 8, faceX, faceY, faceScale);
+    }
 
     // Event strip
     if (sc.eventCallouts && slot.lastEvent.type != SLOT_EVENT_NONE && slot.lastEvent.message[0] != '\0') {
