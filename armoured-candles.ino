@@ -1616,6 +1616,10 @@ async function fetchPairsForSlot(idx, ex) {
       var r = await authFetch('/api/poloniex/markets');
       var d = await r.json();
       list = (d||[]).filter(function(m){return m.symbol&&m.symbol.endsWith('_'+quote);}).map(function(m){return m.symbol.split('_')[0];});
+    } else if (ex === 'okx') {
+      var r = await fetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT');
+      var d = await r.json();
+      list = (d.data||[]).filter(function(s){return s.quoteCcy===quote&&s.state==='live';}).map(function(s){return s.baseCcy;});
     }
     list.sort();
     list = list.filter(function(v,i,a){return i===0||v!==a[i-1];});
