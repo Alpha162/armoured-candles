@@ -1211,9 +1211,12 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     .header h1{font-size:1em}
     .layout-picker{flex-wrap:wrap}
   }
+  #mesh{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none}
+  body>*:not(#mesh){position:relative;z-index:1}
 </style>
 </head>
 <body>
+<canvas id="mesh"></canvas>
 
 <div class="header">
   <h1><span>&#9632;</span> EPD Chart</h1>
@@ -2068,6 +2071,125 @@ buildSlotCards();
 setFirmwareUnlocked(false);
 loadConfig();
 setInterval(loadConfig, 30000);
+
+// ── Crypto Mesh Background ──
+(function(){
+  var cv=document.getElementById('mesh'),ctx=cv.getContext('2d');
+  var W,H,nodes=[],mouse={x:-9999,y:-9999};
+  var COINS=[
+    {t:'BTC',c:'#f7931a'},{t:'ETH',c:'#627eea'},{t:'SOL',c:'#9945ff'},
+    {t:'ADA',c:'#0033ad'},{t:'XRP',c:'#00aae4'},{t:'DOT',c:'#e6007a'},
+    {t:'AVAX',c:'#e84142'},{t:'LINK',c:'#2a5ada'},{t:'MATIC',c:'#8247e5'},
+    {t:'ATOM',c:'#6f7390'}
+  ];
+  var CONN=180,REST=100,REP_R=60,MOUSE_R=150,DAMP=0.98;
+
+  function hexRgb(h){var v=parseInt(h.slice(1),16);return[(v>>16)&255,(v>>8)&255,v&255]}
+  function avgCol(a,b){var A=hexRgb(a),B=hexRgb(b);return 'rgb('+(A[0]+B[0]>>1)+','+(A[1]+B[1]>>1)+','+(A[2]+B[2]>>1)+')'}
+
+  function nodeCount(){return Math.max(25,Math.min(60,Math.floor(W*H/25000)))}
+
+  function makeNode(){
+    var c=COINS[Math.floor(Math.random()*COINS.length)];
+    return{x:Math.random()*W,y:Math.random()*H,vx:0,vy:0,coin:c}
+  }
+
+  function resize(){
+    W=cv.width=window.innerWidth;H=cv.height=window.innerHeight;
+    var target=nodeCount(),diff=target-nodes.length;
+    if(diff>0)for(var i=0;i<diff;i++)nodes.push(makeNode());
+    else if(diff<0)nodes.splice(target);
+  }
+
+  function tick(){
+    var i,j,n,m,dx,dy,d,f,ax,ay;
+    for(i=0;i<nodes.length;i++){
+      n=nodes[i];
+      // Brownian drift
+      n.vx+=(Math.random()-0.5)*0.15;
+      n.vy+=(Math.random()-0.5)*0.15;
+      // Mouse repulsion
+      dx=n.x-mouse.x;dy=n.y-mouse.y;
+      d=Math.sqrt(dx*dx+dy*dy);
+      if(d<MOUSE_R&&d>0.1){f=0.8*(1-d/MOUSE_R);n.vx+=dx/d*f;n.vy+=dy/d*f}
+    }
+    // Pairwise forces
+    for(i=0;i<nodes.length;i++){
+      n=nodes[i];
+      for(j=i+1;j<nodes.length;j++){
+        m=nodes[j];dx=n.x-m.x;dy=n.y-m.y;
+        if(Math.abs(dx)>CONN)continue;
+        if(Math.abs(dy)>CONN)continue;
+        d=Math.sqrt(dx*dx+dy*dy);
+        if(d<0.1)continue;
+        // Repulsion
+        if(d<REP_R){f=1.0/(d*d);ax=dx/d*f;ay=dy/d*f;n.vx+=ax;n.vy+=ay;m.vx-=ax;m.vy-=ay}
+        // Spring
+        if(d<CONN){f=0.0003*(d-REST);ax=dx/d*f;ay=dy/d*f;n.vx-=ax;n.vy-=ay;m.vx+=ax;m.vy+=ay}
+      }
+    }
+    // Integrate
+    for(i=0;i<nodes.length;i++){
+      n=nodes[i];n.vx*=DAMP;n.vy*=DAMP;n.x+=n.vx;n.y+=n.vy;
+      // Wrap
+      if(n.x<-30)n.x=W+30;else if(n.x>W+30)n.x=-30;
+      if(n.y<-30)n.y=H+30;else if(n.y>H+30)n.y=-30;
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    var i,j,n,m,dx,dy,d,a;
+    // Draw connections
+    ctx.lineWidth=1.2;
+    for(i=0;i<nodes.length;i++){
+      n=nodes[i];
+      for(j=i+1;j<nodes.length;j++){
+        m=nodes[j];dx=n.x-m.x;dy=n.y-m.y;
+        if(Math.abs(dx)>CONN||Math.abs(dy)>CONN)continue;
+        d=Math.sqrt(dx*dx+dy*dy);
+        if(d>=CONN)continue;
+        a=(1-d/CONN)*0.25;
+        ctx.save();
+        ctx.strokeStyle=avgCol(n.coin.c,m.coin.c);
+        ctx.globalAlpha=a;
+        ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=4;
+        ctx.beginPath();ctx.moveTo(n.x,n.y);ctx.lineTo(m.x,m.y);ctx.stroke();
+        ctx.restore();
+      }
+    }
+    // Draw nodes
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.font='bold 11px JetBrains Mono,monospace';
+    for(i=0;i<nodes.length;i++){
+      n=nodes[i];
+      // Glow
+      ctx.save();
+      ctx.globalAlpha=0.15;
+      ctx.shadowColor=n.coin.c;ctx.shadowBlur=18;
+      ctx.fillStyle=n.coin.c;
+      ctx.beginPath();ctx.arc(n.x,n.y,12,0,6.2832);ctx.fill();
+      ctx.restore();
+      // Label
+      ctx.save();
+      ctx.globalAlpha=0.7;
+      ctx.fillStyle=n.coin.c;
+      ctx.shadowColor=n.coin.c;ctx.shadowBlur=6;
+      ctx.fillText(n.coin.t,n.x,n.y);
+      ctx.restore();
+    }
+  }
+
+  function loop(){tick();draw();requestAnimationFrame(loop)}
+
+  document.addEventListener('mousemove',function(e){mouse.x=e.clientX;mouse.y=e.clientY});
+  document.addEventListener('mouseleave',function(){mouse.x=-9999;mouse.y=-9999});
+  var resizeTimer;
+  window.addEventListener('resize',function(){clearTimeout(resizeTimer);resizeTimer=setTimeout(resize,200)});
+
+  resize();
+  requestAnimationFrame(loop);
+})();
 </script>
 </body>
 </html>
