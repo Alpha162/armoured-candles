@@ -2077,12 +2077,75 @@ setInterval(loadConfig, 30000);
   var cv=document.getElementById('mesh'),ctx=cv.getContext('2d');
   var W,H,nodes=[],mouse={x:-9999,y:-9999};
   var COINS=[
-    {t:'BTC',c:'#f7931a'},{t:'ETH',c:'#627eea'},{t:'SOL',c:'#9945ff'},
-    {t:'ADA',c:'#0033ad'},{t:'XRP',c:'#00aae4'},{t:'DOT',c:'#e6007a'},
-    {t:'AVAX',c:'#e84142'},{t:'LINK',c:'#2a5ada'},{t:'MATIC',c:'#8247e5'},
-    {t:'ATOM',c:'#6f7390'}
+    {c:'#f7931a',d:0},{c:'#627eea',d:1},{c:'#00aae4',d:2},
+    {c:'#f0b90b',d:3},{c:'#9945ff',d:4},{c:'#c2a633',d:5},
+    {c:'#0033ad',d:6},{c:'#ff0013',d:7},{c:'#2a5ada',d:8},
+    {c:'#e84142',d:9}
   ];
-  var CONN=180,REST=100,REP_R=60,MOUSE_R=150,DAMP=0.98;
+  var CONN=200,REST=120,REP_R=100,MOUSE_R=150,DAMP=0.98;
+  var PI=Math.PI,TAU=PI*2;
+  function icon(c,x,y,d){
+    var s=7;
+    c.save();c.translate(x,y);
+    switch(d){
+    case 0:// BTC - ₿
+      c.lineWidth=1.6;c.strokeStyle=c.fillStyle;
+      c.beginPath();c.moveTo(-s*0.4,-s);c.lineTo(-s*0.4,s);c.moveTo(s*0.1,-s);c.lineTo(s*0.1,s);c.stroke();
+      c.beginPath();c.moveTo(-s*0.6,-s*0.7);c.lineTo(s*0.1,-s*0.7);
+      c.quadraticCurveTo(s*0.8,-s*0.7,s*0.8,-s*0.15);c.quadraticCurveTo(s*0.8,s*0.2,s*0.1,s*0.1);
+      c.lineTo(s*0.1,s*0.1);c.quadraticCurveTo(s*0.9,s*0.1,s*0.9,s*0.5);
+      c.quadraticCurveTo(s*0.9,s*0.8,s*0.1,s*0.7);c.lineTo(-s*0.6,s*0.7);c.closePath();c.stroke();
+      break;
+    case 1:// ETH - diamond
+      c.beginPath();c.moveTo(0,-s*1.2);c.lineTo(s*0.7,0);c.lineTo(0,s*1.2);c.lineTo(-s*0.7,0);c.closePath();c.fill();
+      c.globalAlpha=0.3;c.fillStyle='#000';
+      c.beginPath();c.moveTo(0,-s*1.2);c.lineTo(s*0.7,0);c.lineTo(0,s*0.2);c.lineTo(-s*0.7,0);c.closePath();c.fill();
+      break;
+    case 2:// XRP - X shape with circle
+      c.lineWidth=2;c.strokeStyle=c.fillStyle;
+      c.beginPath();c.moveTo(-s*0.7,-s*0.7);c.lineTo(s*0.7,s*0.7);c.moveTo(s*0.7,-s*0.7);c.lineTo(-s*0.7,s*0.7);c.stroke();
+      c.beginPath();c.arc(0,0,s*0.3,0,TAU);c.fill();
+      break;
+    case 3:// BNB - diamond
+      c.beginPath();c.moveTo(0,-s);c.lineTo(s,0);c.lineTo(0,s);c.lineTo(-s,0);c.closePath();c.fill();
+      c.globalAlpha=0.4;c.fillStyle='#000';
+      c.beginPath();c.moveTo(0,-s*0.4);c.lineTo(s*0.4,0);c.lineTo(0,s*0.4);c.lineTo(-s*0.4,0);c.closePath();c.fill();
+      break;
+    case 4:// SOL - three slanted parallel lines
+      c.lineWidth=2.2;c.strokeStyle=c.fillStyle;c.lineCap='round';
+      c.beginPath();c.moveTo(-s*0.8,-s*0.6);c.lineTo(s*0.8,-s*0.6);c.lineTo(-s*0.8,-s*0.1);c.stroke();
+      c.beginPath();c.moveTo(-s*0.8,s*0.15);c.lineTo(s*0.8,s*0.15);c.stroke();
+      c.beginPath();c.moveTo(s*0.8,s*0.6);c.lineTo(-s*0.8,s*0.6);c.lineTo(s*0.8,s*0.1);c.stroke();
+      break;
+    case 5:// DOGE - Ð
+      c.lineWidth=1.6;c.strokeStyle=c.fillStyle;
+      c.beginPath();c.moveTo(-s*0.3,-s*0.8);c.lineTo(-s*0.3,s*0.8);c.lineTo(0,s*0.8);
+      c.quadraticCurveTo(s*0.9,s*0.8,s*0.9,0);c.quadraticCurveTo(s*0.9,-s*0.8,0,-s*0.8);c.closePath();c.stroke();
+      c.beginPath();c.moveTo(-s*0.6,0);c.lineTo(s*0.5,0);c.stroke();
+      break;
+    case 6:// ADA - six-pointed star
+      var i,a;c.beginPath();
+      for(i=0;i<6;i++){a=i*PI/3-PI/2;c.lineTo(Math.cos(a)*s,Math.sin(a)*s);c.lineTo(Math.cos(a+PI/6)*s*0.5,Math.sin(a+PI/6)*s*0.5)}
+      c.closePath();c.fill();
+      break;
+    case 7:// TRX - triangle
+      c.beginPath();c.moveTo(0,-s);c.lineTo(s*0.9,s*0.7);c.lineTo(-s*0.9,s*0.7);c.closePath();c.fill();
+      c.globalAlpha=0.3;c.fillStyle='#000';
+      c.beginPath();c.moveTo(0,-s*0.3);c.lineTo(s*0.4,s*0.4);c.lineTo(-s*0.4,s*0.4);c.closePath();c.fill();
+      break;
+    case 8:// LINK - hexagon
+      var i,a;c.beginPath();
+      for(i=0;i<6;i++){a=i*PI/3;c.lineTo(Math.cos(a)*s,Math.sin(a)*s)}
+      c.closePath();c.stroke();c.lineWidth=1.5;c.strokeStyle=c.fillStyle;
+      c.beginPath();for(i=0;i<6;i++){a=i*PI/3;c.lineTo(Math.cos(a)*s*0.55,Math.sin(a)*s*0.55)}
+      c.closePath();c.fill();
+      break;
+    case 9:// AVAX - mountain A
+      c.beginPath();c.moveTo(0,-s);c.lineTo(s*0.9,s*0.7);c.lineTo(s*0.3,s*0.7);c.lineTo(0,s*0.15);c.lineTo(-s*0.3,s*0.7);c.lineTo(-s*0.9,s*0.7);c.closePath();c.fill();
+      break;
+    }
+    c.restore();
+  }
 
   function hexRgb(h){var v=parseInt(h.slice(1),16);return[(v>>16)&255,(v>>8)&255,v&255]}
   function avgCol(a,b){var A=hexRgb(a),B=hexRgb(b);return 'rgb('+(A[0]+B[0]>>1)+','+(A[1]+B[1]>>1)+','+(A[2]+B[2]>>1)+')'}
@@ -2123,7 +2186,7 @@ setInterval(loadConfig, 30000);
         d=Math.sqrt(dx*dx+dy*dy);
         if(d<0.1)continue;
         // Repulsion
-        if(d<REP_R){f=1.0/(d*d);ax=dx/d*f;ay=dy/d*f;n.vx+=ax;n.vy+=ay;m.vx-=ax;m.vy-=ay}
+        if(d<REP_R){f=3.0/(d*d);ax=dx/d*f;ay=dy/d*f;n.vx+=ax;n.vy+=ay;m.vx-=ax;m.vy-=ay}
         // Spring
         if(d<CONN){f=0.0003*(d-REST);ax=dx/d*f;ay=dy/d*f;n.vx-=ax;n.vy-=ay;m.vx+=ax;m.vy+=ay}
       }
@@ -2159,23 +2222,22 @@ setInterval(loadConfig, 30000);
       }
     }
     // Draw nodes
-    ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.font='bold 11px JetBrains Mono,monospace';
     for(i=0;i<nodes.length;i++){
       n=nodes[i];
       // Glow
       ctx.save();
-      ctx.globalAlpha=0.15;
-      ctx.shadowColor=n.coin.c;ctx.shadowBlur=18;
+      ctx.globalAlpha=0.12;
+      ctx.shadowColor=n.coin.c;ctx.shadowBlur=20;
       ctx.fillStyle=n.coin.c;
-      ctx.beginPath();ctx.arc(n.x,n.y,12,0,6.2832);ctx.fill();
+      ctx.beginPath();ctx.arc(n.x,n.y,14,0,6.2832);ctx.fill();
       ctx.restore();
-      // Label
+      // Icon
       ctx.save();
-      ctx.globalAlpha=0.7;
+      ctx.globalAlpha=0.75;
       ctx.fillStyle=n.coin.c;
-      ctx.shadowColor=n.coin.c;ctx.shadowBlur=6;
-      ctx.fillText(n.coin.t,n.x,n.y);
+      ctx.strokeStyle=n.coin.c;
+      ctx.shadowColor=n.coin.c;ctx.shadowBlur=8;
+      icon(ctx,n.x,n.y,n.coin.d);
       ctx.restore();
     }
   }
