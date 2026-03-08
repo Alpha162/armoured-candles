@@ -2167,7 +2167,7 @@ setInterval(loadConfig, 30000);
   }
 
   function tick(){
-    var i,j,n,m,dx,dy,d,f,ax,ay,lc=[];
+    var i,j,n,m,dx,dy,d,f,ax,ay,lc=[],cands=[];
     edges=[];
     for(i=0;i<nodes.length;i++){
       n=nodes[i];lc[i]=0;
@@ -2179,7 +2179,7 @@ setInterval(loadConfig, 30000);
       d=Math.sqrt(dx*dx+dy*dy);
       if(d<MOUSE_R&&d>0.1){f=0.8*(1-d/MOUSE_R);n.vx+=dx/d*f;n.vy+=dy/d*f}
     }
-    // Pairwise forces
+    // Pairwise: repulsion + collect candidates
     for(i=0;i<nodes.length;i++){
       n=nodes[i];
       for(j=i+1;j<nodes.length;j++){
@@ -2190,11 +2190,21 @@ setInterval(loadConfig, 30000);
         if(d<0.1)continue;
         // Repulsion (always applies)
         if(d<REP_R){f=3.0/(d*d);ax=dx/d*f;ay=dy/d*f;n.vx+=ax;n.vy+=ay;m.vx-=ax;m.vy-=ay}
-        // Spring + edge (only if both nodes under link cap)
-        if(d<CONN&&lc[i]<MAX_LINKS&&lc[j]<MAX_LINKS){
-          f=0.0003*(d-REST);ax=dx/d*f;ay=dy/d*f;n.vx-=ax;n.vy-=ay;m.vx+=ax;m.vy+=ay;
-          edges.push(i,j,d);lc[i]++;lc[j]++;
-        }
+        // Candidate edge
+        if(d<CONN)cands.push({i:i,j:j,d:d});
+      }
+    }
+    // Sort candidates by distance (shortest first)
+    cands.sort(function(a,b){return a.d-b.d});
+    // Greedily assign edges to nearest neighbors
+    for(i=0;i<cands.length;i++){
+      var e=cands[i];
+      if(lc[e.i]<MAX_LINKS&&lc[e.j]<MAX_LINKS){
+        // Apply spring force
+        n=nodes[e.i];m=nodes[e.j];dx=n.x-m.x;dy=n.y-m.y;d=e.d;
+        f=0.0003*(d-REST);ax=dx/d*f;ay=dy/d*f;
+        n.vx-=ax;n.vy-=ay;m.vx+=ax;m.vy+=ay;
+        edges.push(e.i,e.j,d);lc[e.i]++;lc[e.j]++;
       }
     }
     // Integrate
