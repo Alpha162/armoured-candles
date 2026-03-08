@@ -2077,14 +2077,14 @@ setInterval(loadConfig, 30000);
 // ── Crypto Mesh Background ──
 (function(){
   var cv=document.getElementById('mesh'),ctx=cv.getContext('2d');
-  var W,H,nodes=[],mouse={x:-9999,y:-9999};
+  var W,H,nodes=[],edges=[],mouse={x:-9999,y:-9999};
   var COINS=[
     {c:'#f7931a',d:0},{c:'#627eea',d:1},{c:'#00aae4',d:2},
     {c:'#f0b90b',d:3},{c:'#9945ff',d:4},{c:'#c2a633',d:5},
     {c:'#0033ad',d:6},{c:'#ff0013',d:7},{c:'#2a5ada',d:8},
     {c:'#e84142',d:9}
   ];
-  var CONN=200,REST=120,REP_R=100,MOUSE_R=150,DAMP=0.98;
+  var CONN=200,REST=120,REP_R=100,MOUSE_R=150,DAMP=0.98,MAX_LINKS=3;
   var PI=Math.PI,TAU=PI*2;
   function icon(c,x,y,d){
     var s=7;
@@ -2167,9 +2167,10 @@ setInterval(loadConfig, 30000);
   }
 
   function tick(){
-    var i,j,n,m,dx,dy,d,f,ax,ay;
+    var i,j,n,m,dx,dy,d,f,ax,ay,lc=[];
+    edges=[];
     for(i=0;i<nodes.length;i++){
-      n=nodes[i];
+      n=nodes[i];lc[i]=0;
       // Brownian drift
       n.vx+=(Math.random()-0.5)*0.15;
       n.vy+=(Math.random()-0.5)*0.15;
@@ -2187,10 +2188,13 @@ setInterval(loadConfig, 30000);
         if(Math.abs(dy)>CONN)continue;
         d=Math.sqrt(dx*dx+dy*dy);
         if(d<0.1)continue;
-        // Repulsion
+        // Repulsion (always applies)
         if(d<REP_R){f=3.0/(d*d);ax=dx/d*f;ay=dy/d*f;n.vx+=ax;n.vy+=ay;m.vx-=ax;m.vy-=ay}
-        // Spring
-        if(d<CONN){f=0.0003*(d-REST);ax=dx/d*f;ay=dy/d*f;n.vx-=ax;n.vy-=ay;m.vx+=ax;m.vy+=ay}
+        // Spring + edge (only if both nodes under link cap)
+        if(d<CONN&&lc[i]<MAX_LINKS&&lc[j]<MAX_LINKS){
+          f=0.0003*(d-REST);ax=dx/d*f;ay=dy/d*f;n.vx-=ax;n.vy-=ay;m.vx+=ax;m.vy+=ay;
+          edges.push(i,j,d);lc[i]++;lc[j]++;
+        }
       }
     }
     // Integrate
@@ -2204,24 +2208,18 @@ setInterval(loadConfig, 30000);
 
   function draw(){
     ctx.clearRect(0,0,W,H);
-    var i,j,n,m,dx,dy,d,a;
-    // Draw connections
+    var i,n,m,d,a,k;
+    // Draw connections from precomputed edges
     ctx.lineWidth=1.2;
-    for(i=0;i<nodes.length;i++){
-      n=nodes[i];
-      for(j=i+1;j<nodes.length;j++){
-        m=nodes[j];dx=n.x-m.x;dy=n.y-m.y;
-        if(Math.abs(dx)>CONN||Math.abs(dy)>CONN)continue;
-        d=Math.sqrt(dx*dx+dy*dy);
-        if(d>=CONN)continue;
-        a=(1-d/CONN)*0.25;
-        ctx.save();
-        ctx.strokeStyle=avgCol(n.coin.c,m.coin.c);
-        ctx.globalAlpha=a;
-        ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=4;
-        ctx.beginPath();ctx.moveTo(n.x,n.y);ctx.lineTo(m.x,m.y);ctx.stroke();
-        ctx.restore();
-      }
+    for(k=0;k<edges.length;k+=3){
+      n=nodes[edges[k]];m=nodes[edges[k+1]];d=edges[k+2];
+      a=(1-d/CONN)*0.25;
+      ctx.save();
+      ctx.strokeStyle=avgCol(n.coin.c,m.coin.c);
+      ctx.globalAlpha=a;
+      ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=4;
+      ctx.beginPath();ctx.moveTo(n.x,n.y);ctx.lineTo(m.x,m.y);ctx.stroke();
+      ctx.restore();
     }
     // Draw nodes
     for(i=0;i<nodes.length;i++){
