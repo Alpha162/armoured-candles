@@ -1054,7 +1054,8 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     min-height:100vh;padding:0;
   }
   .header{
-    background:linear-gradient(135deg,#0d1520 0%,#111d2b 100%);
+    background:linear-gradient(135deg,rgba(13,21,32,0.72) 0%,rgba(17,29,43,0.72) 100%);
+    backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
     border-bottom:1px solid var(--border);padding:20px 24px;
     display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;
   }
@@ -1067,17 +1068,18 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   .pill{
     font-family:'JetBrains Mono',monospace;font-size:0.72em;
     padding:4px 10px;border-radius:20px;border:1px solid var(--border);
-    background:var(--surface);color:var(--text-dim);white-space:nowrap;
+    background:rgba(17,22,29,0.6);color:var(--text-dim);white-space:nowrap;
   }
-  .pill.live{border-color:var(--green);color:var(--green);background:var(--green-dim)}
+  .pill.live{border-color:var(--green);color:var(--green);background:rgba(26,58,36,0.6)}
   .pill.warn{border-color:var(--amber);color:var(--amber)}
-  .pill.neg{border-color:var(--red);color:var(--red);background:var(--red-dim)}
-  .pill.neutral{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+  .pill.neg{border-color:var(--red);color:var(--red);background:rgba(58,26,26,0.6)}
+  .pill.neutral{border-color:var(--accent);color:var(--accent);background:rgba(26,58,74,0.6)}
 
   .container{max-width:640px;margin:0 auto;padding:16px 16px 100px}
 
   .card{
-    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    background:rgba(17,22,29,0.7);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--border);border-radius:var(--radius);
     margin-bottom:12px;overflow:hidden;
   }
   .card-head{
@@ -1097,7 +1099,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   .field .hint{font-size:0.7em;color:var(--text-dim);margin-top:3px;font-style:italic}
 
   input[type=text],input[type=number],input[type=password],select{
-    width:100%;padding:9px 12px;background:var(--bg);border:1px solid var(--border);
+    width:100%;padding:9px 12px;background:rgba(10,14,20,0.6);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--border);
     border-radius:6px;color:var(--text-bright);font-family:'JetBrains Mono',monospace;
     font-size:0.85em;outline:none;transition:border-color .2s;
   }
@@ -1131,35 +1133,35 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
   .auto-info{
     font-family:'JetBrains Mono',monospace;font-size:0.78em;
-    color:var(--accent);padding:8px 12px;background:var(--accent-dim);
+    color:var(--accent);padding:8px 12px;background:rgba(26,58,74,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
     border-radius:6px;margin-top:8px;border:1px solid #1e4a5e;
   }
 
   .actions{
     position:fixed;bottom:0;left:0;right:0;
-    background:linear-gradient(transparent,var(--bg) 20%);padding:12px 16px 20px;
+    background:linear-gradient(transparent,rgba(10,14,20,0.75) 20%);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);padding:12px 16px 20px;
     display:flex;gap:8px;justify-content:center;z-index:10;
   }
   .btn{
     font-family:'DM Sans',sans-serif;font-weight:600;font-size:0.82em;
     padding:10px 20px;border-radius:8px;border:1px solid var(--border);
-    cursor:pointer;transition:all .2s;color:var(--text);background:var(--surface2);
+    cursor:pointer;transition:all .2s;color:var(--text);background:rgba(26,32,41,0.65);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
     display:flex;align-items:center;gap:6px;
   }
-  .btn:hover{border-color:var(--border-h);background:var(--border)}
-  .btn.primary{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
-  .btn.primary:hover{background:#1e5a6e}
-  .btn.danger{border-color:var(--red);color:var(--red);background:var(--red-dim)}
-  .btn.danger:hover{background:#4a1a1a}
+  .btn:hover{border-color:var(--border-h);background:rgba(37,45,56,0.7)}
+  .btn.primary{background:rgba(26,58,74,0.65);border-color:var(--accent);color:var(--accent)}
+  .btn.primary:hover{background:rgba(30,90,110,0.7)}
+  .btn.danger{border-color:var(--red);color:var(--red);background:rgba(58,26,26,0.65)}
+  .btn.danger:hover{background:rgba(74,26,26,0.7)}
 
   .toast{
     position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-80px);
     font-family:'JetBrains Mono',monospace;font-size:0.8em;
     padding:10px 20px;border-radius:8px;z-index:100;transition:transform .4s ease;
-    border:1px solid var(--green);background:var(--green-dim);color:var(--green);
+    border:1px solid var(--green);background:rgba(26,58,36,0.75);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:var(--green);
     pointer-events:none;
   }
-  .toast.error{border-color:var(--red);background:var(--red-dim);color:var(--red)}
+  .toast.error{border-color:var(--red);background:rgba(58,26,26,0.75);color:var(--red)}
   .toast.show{transform:translateX(-50%) translateY(0)}
 
   .coin-wrap{position:relative}
@@ -1167,14 +1169,14 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   .coin-dd{
     display:none;position:absolute;top:100%;left:0;right:0;z-index:20;
     max-height:220px;overflow-y:auto;
-    background:var(--bg);border:1px solid var(--accent);border-top:0;border-radius:0 0 6px 6px;
+    background:rgba(10,14,20,0.8);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid var(--accent);border-top:0;border-radius:0 0 6px 6px;
   }
   .coin-dd.open{display:block}
   .coin-dd .coin-item{
     padding:7px 12px;font-family:'JetBrains Mono',monospace;font-size:0.82em;
     color:var(--text);cursor:pointer;
   }
-  .coin-dd .coin-item:hover,.coin-dd .coin-item.hl{background:var(--accent-dim);color:var(--accent)}
+  .coin-dd .coin-item:hover,.coin-dd .coin-item.hl{background:rgba(26,58,74,0.6);color:var(--accent)}
   .coin-dd .coin-empty{padding:10px 12px;font-size:0.78em;color:var(--text-dim);font-style:italic}
   .coin-loading{padding:10px 12px;font-size:0.78em;color:var(--accent);font-family:'JetBrains Mono',monospace}
 
@@ -1184,10 +1186,10 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   .layout-thumb{
     display:flex;flex-direction:column;align-items:center;gap:6px;
     padding:10px 8px;border:1px solid var(--border);border-radius:8px;
-    background:var(--bg);transition:all .2s;
+    background:rgba(10,14,20,0.6);transition:all .2s;
   }
   .layout-opt input:checked + .layout-thumb{
-    border-color:var(--accent);background:var(--accent-dim);
+    border-color:var(--accent);background:rgba(26,58,74,0.55);
   }
   .layout-thumb span{
     font-family:'JetBrains Mono',monospace;font-size:0.75em;color:var(--text-dim);
